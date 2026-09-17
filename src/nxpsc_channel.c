@@ -671,8 +671,6 @@ static int decode_ev1(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
         }
 
         size_t data_len = src_len - mac_len;
-        memcpy(dst, src, data_len);
-        *dst_len = data_len;
 
         uint8_t *buf = calloc(data_len + 1, 1);
         if (buf == NULL) {
