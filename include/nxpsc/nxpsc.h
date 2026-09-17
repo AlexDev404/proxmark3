@@ -227,6 +227,11 @@ nxpsc_cmdset_t nxpsc_get_cmdset(const nxpsc_card_t *card);
 // default communication mode for commands that do not derive one from a file
 void nxpsc_set_commmode(nxpsc_card_t *card, nxpsc_commmode_t mode);
 bool nxpsc_is_authenticated(const nxpsc_card_t *card);
+// the PICC aborts secure messaging whenever it answers an in session command
+// with an error status. when that happens the session is dropped on both sides
+// and every later command that needs it fails with NXPSC_E_AUTH until the
+// caller authenticates again or calls nxpsc_reset_channel()
+bool nxpsc_session_lost(const nxpsc_card_t *card);
 uint32_t nxpsc_selected_aid(const nxpsc_card_t *card);
 
 //-----------------------------------------------------------------------------

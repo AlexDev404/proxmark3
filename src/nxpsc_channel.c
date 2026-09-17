@@ -640,13 +640,13 @@ static int decode_d40(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
             return rc;
         }
 
+        // legacy sessions protect the payload with a CRC16 over the data
+        // alone, which is what EV3 silicon answers GetCardUID with, verified
+        // on the wire. later silicon is not consistent about it across the
+        // whole command set, so fall back to the EV1 style CRC32 over
+        // data || status on the same plaintext, as proxmark3 does
         size_t pure = nxpsc_search_crc_pos(plain, src_len, status, 2);
         if (pure == 0 && card->type != DESFIRE_MF3ICD40) {
-            memcpy(iv, card->iv, sizeof(iv));
-            rc = nxpsc_cbc_crypt(card->key_type, card->session_enc, iv, src, src_len, plain, false);
-            if (rc != NXPSC_OK) {
-                return rc;
-            }
             pure = nxpsc_search_crc_pos(plain, src_len, status, 4);
         }
         if (pure == 0) {
@@ -932,7 +932,18 @@ static int auth_legacy(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *ke
     }
 
     uint8_t session[NXPSC_MAX_KEY_SIZE] = {0};
-    nxpsc_session_key_d40(rnd_a, rnd_b, key->type, session);
+    // a 2TDEA key whose two halves are equal is a single DES key. the PICC
+    // stores both under the same key type nibble and tells them apart by
+    // comparing the halves, so it derives the 8 byte DES session key here. the
+    // handshake itself cannot expose the difference, 3DES with K1 == K2 is
+    // single DES, only the first command on the session does. keep our copy
+    // duplicated so the 2K3DES code path stays mathematically identical
+    if (key->type == NXPSC_KEY_2K3DES && nxpsc_memeq(key->data, key->data + 8, 8)) {
+        nxpsc_session_key_d40(rnd_a, rnd_b, NXPSC_KEY_DES, session);
+        memcpy(session + 8, session, 8);
+    } else {
+        nxpsc_session_key_d40(rnd_a, rnd_b, key->type, session);
+    }
 
     rol(rnd_a, rnd_len);
     if (nxpsc_memeq(rnd_a, enc_rnd_a, rnd_len) == false) {

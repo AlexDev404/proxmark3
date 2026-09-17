@@ -24,9 +24,12 @@
 //-----------------------------------------------------------------------------
 // helpers
 //-----------------------------------------------------------------------------
-// without a session every command is plain, no matter what the caller asked for
+// without a session every command is plain, no matter what the caller asked
+// for. a session that the card threw away mid conversation is the exception,
+// there the caller asked for protection we can no longer give, so the mode is
+// left alone and nxpsc_exchange() refuses it with NXPSC_E_AUTH
 static nxpsc_mode_t eff(const nxpsc_card_t *card, nxpsc_mode_t mode) {
-    if (card->authenticated == false) {
+    if (card->authenticated == false && card->session_lost == false) {
         return MODE_PLAIN;
     }
     return mode;

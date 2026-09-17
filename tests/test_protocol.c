@@ -784,14 +784,12 @@ static void test_secure_channel_exact_buffers(void) {
                                      NXPSC_KEY_AES128, NXPSC_COMM_FULL));
 }
 
-static void test_legacy_get_card_uid_ev1_style(void) {
+static bool run_legacy_get_card_uid_case(bool ev1_style_crc) {
     static const uint8_t session[16] = {
         0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
         0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
     };
-    static const uint8_t iv[16] = {
-        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48
-    };
+    static const uint8_t iv[16] = {0};
     static const uint8_t ti[4] = {0};
 
     mock_card_t mock;
@@ -803,32 +801,105 @@ static void test_legacy_get_card_uid_ev1_style(void) {
     size_t uid_len = 0;
 
     if (ok) {
-        mock.d40_ev1_style_uid = true;
+        mock.d40_ev1_style_uid = ev1_style_crc;
         ok = ok && (nxpsc_get_card_uid(card, uid, sizeof(uid), &uid_len) == NXPSC_OK);
         ok = ok && (uid_len == sizeof(uid));
         ok = ok && (memcmp(uid, mock.uid, sizeof(uid)) == 0);
     }
 
-    check("legacy GetCardUID EV1-style decode", ok);
+    nxpsc_close(card);
+    return ok;
+}
+
+// a legacy session always enciphers the same way. EV3 answers GetCardUID with
+// the legacy CRC16, confirmed against the card, but the decoder accepts the
+// EV1 style CRC32 too because later silicon is not consistent about it
+static void test_legacy_get_card_uid(void) {
+    check("legacy GetCardUID, CRC16 payload", run_legacy_get_card_uid_case(false));
+    check("legacy GetCardUID, CRC32 payload", run_legacy_get_card_uid_case(true));
+}
+
+// a 2TDEA key with two equal halves is a DES key. the PICC cannot tell the two
+// apart from the key type alone and derives the shorter session key, which the
+// handshake never exposes because 3DES with K1 == K2 is single DES
+static void test_legacy_des_degraded_session_key(void) {
+    // fixed_rng() and the mock both build RndA as 0x10 + index
+    static const uint8_t rnd_a[8] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
+    static const uint8_t rnd_b[8] = {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7};
+
+    nxpsc_key_t key;
+    memset(&key, 0, sizeof(key));
+    key.type = NXPSC_KEY_2K3DES;
+
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV3);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok) {
+        card->type = DESFIRE_EV3;
+        mock.auth_scheme = MOCK_AUTH_LEGACY;
+        mock.auth_key_type = NXPSC_KEY_2K3DES;
+        memset(mock.auth_key, 0, sizeof(mock.auth_key));
+        memcpy(mock.auth_rnd_b, rnd_b, sizeof(rnd_b));
+        nxpsc_set_rng(fixed_rng, NULL);
+
+        ok = ok && (nxpsc_authenticate(card, 0, &key, NXPSC_CHAN_D40) == NXPSC_OK);
+        nxpsc_set_rng(NULL, NULL);
+    }
+
+    if (ok) {
+        // DES session key, RndA[0..3] || RndB[0..3], held duplicated
+        uint8_t want[16] = {0};
+        memcpy(want, rnd_a, 4);
+        memcpy(want + 4, rnd_b, 4);
+        memcpy(want + 8, want, 8);
+        ok = ok && (memcmp(card->session_enc, want, sizeof(want)) == 0);
+        ok = ok && (memcmp(mock.secure_session_enc, want, sizeof(want)) == 0);
+
+        // and the first command on that session decodes, which is the only
+        // place a wrong derivation would ever show up
+        uint8_t uid[7] = {0};
+        size_t uid_len = 0;
+        ok = ok && (nxpsc_get_card_uid(card, uid, sizeof(uid), &uid_len) == NXPSC_OK);
+        ok = ok && (uid_len == sizeof(uid));
+        ok = ok && (memcmp(uid, mock.uid, sizeof(uid)) == 0);
+    }
+
+    check("legacy DES degraded session key", ok);
     nxpsc_close(card);
 }
 
-static void test_ev2_counter_sync_on_card_error(void) {
-    static const uint8_t session_enc[16] = {
-        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
-        0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F
+// an error answer inside a session is not a counter problem, the PICC has
+// already thrown the session away by the time it sends one
+static void test_session_abort_on_card_error(void) {
+    const nxpsc_key_t key = {
+        .type = NXPSC_KEY_AES128,
+        .data = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F},
     };
-    static const uint8_t session_mac[16] = {
-        0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
-        0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F
-    };
-    static const uint8_t iv[16] = {0};
-    static const uint8_t ti[4] = {0xCA, 0xFE, 0xBA, 0xBE};
+    static const uint8_t rnd_b[16] = {0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+                                      0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F};
 
     mock_card_t mock;
+    nxpsc_transport_t transport;
     nxpsc_card_t *card = NULL;
-    bool ok = setup_secure_session(&mock, &card, DESFIRE_EV3, NXPSC_CHAN_EV2,
-                                   NXPSC_KEY_AES128, session_enc, session_mac, iv, ti, 0);
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+    mock.auth_key_type = NXPSC_KEY_AES128;
+    memcpy(mock.auth_key, key.data, sizeof(mock.auth_key));
+    memcpy(mock.auth_rnd_b, rnd_b, sizeof(rnd_b));
+
+    nxpsc_set_rng(fixed_rng, NULL);
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok) {
+        card->type = DESFIRE_EV2;
+        ok = (nxpsc_authenticate(card, 0, &key, NXPSC_CHAN_EV2) == NXPSC_OK);
+    }
 
     if (ok) {
         mock.validate_secure_requests = true;
@@ -842,20 +913,35 @@ static void test_ev2_counter_sync_on_card_error(void) {
                                   NXPSC_COMM_PLAIN, NXPSC_COMM_PLAIN,
                                   resp, sizeof(resp), &resp_len) == NXPSC_E_CARD);
         ok = ok && (nxpsc_last_status(card) == 0x9D);
-        ok = ok && (card->cmd_ctr == 1);
 
+        // both sides dropped the session, and ours says so
+        ok = ok && (nxpsc_is_authenticated(card) == false);
+        ok = ok && nxpsc_session_lost(card);
+        ok = ok && (mock.secure_active == false);
+
+        // the next command that needs the session fails locally, without
+        // putting a MACed frame on the wire for the card to read as garbage
+        size_t before = mock.tx_count;
         uint32_t aids[2] = {0};
         size_t count = 0;
+        ok = ok && (nxpsc_get_application_ids(card, aids, 2, &count) == NXPSC_E_AUTH);
+        ok = ok && (mock.tx_count == before);
+
+        // authenticating again restores service
+        ok = ok && (nxpsc_authenticate(card, 0, &key, NXPSC_CHAN_EV2) == NXPSC_OK);
+        ok = ok && (nxpsc_session_lost(card) == false);
         ok = ok && (nxpsc_get_application_ids(card, aids, 2, &count) == NXPSC_OK);
         ok = ok && (count == 2);
         ok = ok && (aids[0] == 0x030201) && (aids[1] == 0x332211);
-        ok = ok && (card->cmd_ctr == 2);
-        ok = ok && (mock.secure_cmd_ctr == 2);
+        ok = ok && (card->cmd_ctr == mock.secure_cmd_ctr);
     }
 
-    check("EV2 counter sync after card error", ok);
+    nxpsc_set_rng(NULL, NULL);
+    check("session dropped after card error", ok);
     nxpsc_close(card);
 }
+
+
 
 static void test_plus_authentication(void) {
     plus_auth_ctx_t ctx = {
@@ -1055,8 +1141,9 @@ int main(void) {
     test_proximity_check();
     test_secure_channel_guards();
     test_secure_channel_exact_buffers();
-    test_legacy_get_card_uid_ev1_style();
-    test_ev2_counter_sync_on_card_error();
+    test_legacy_get_card_uid();
+    test_legacy_des_degraded_session_key();
+    test_session_abort_on_card_error();
     test_plus_authentication();
     test_plus_missing_mac();
     test_delegation_and_config();

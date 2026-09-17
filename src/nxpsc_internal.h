@@ -162,6 +162,9 @@ struct nxpsc_card {
     nxpsc_channel_t channel;        // NXPSC_CHAN_AUTO means no secure channel
     nxpsc_commmode_t default_comm;
     bool authenticated;
+    // set when the PICC aborted secure messaging under us, cleared by the next
+    // authentication or by an explicit nxpsc_reset_channel()
+    bool session_lost;
 
     nxpsc_mode_t mode;              // mode of the command being processed
     nxpsc_keytype_t key_type;
@@ -216,6 +219,9 @@ int nxpsc_channel_decode(nxpsc_card_t *card, const uint8_t *src, size_t src_len,
                          uint8_t *dst, size_t cap, size_t *dst_len);
 
 nxpsc_mode_t nxpsc_mode_from_public(nxpsc_commmode_t comm);
+
+// true for the statuses that make the PICC drop the secure messaging session
+bool nxpsc_status_ends_session(uint8_t status);
 
 // EV2 / LRP session helpers, shared with the self test
 void nxpsc_ev2_fill_iv(nxpsc_card_t *card, bool for_command, uint8_t *iv);

@@ -199,6 +199,7 @@ void nxpsc_reset_channel(nxpsc_card_t *card) {
 
     card->channel = NXPSC_CHAN_AUTO;
     card->authenticated = false;
+    card->session_lost = false;
     card->cmd_ctr = 0;
     memset(card->ti, 0, sizeof(card->ti));
     memset(card->iv, 0, sizeof(card->iv));
@@ -228,6 +229,17 @@ void nxpsc_set_commmode(nxpsc_card_t *card, nxpsc_commmode_t mode) {
 
 bool nxpsc_is_authenticated(const nxpsc_card_t *card) {
     return (card != NULL && card->authenticated);
+}
+
+bool nxpsc_session_lost(const nxpsc_card_t *card) {
+    return (card != NULL && card->session_lost);
+}
+
+// the PICC aborts secure messaging whenever it answers a command inside a
+// session with an error, so everything but a success or a continuation frame
+// leaves the reader talking to a card that has already thrown the session away
+bool nxpsc_status_ends_session(uint8_t status) {
+    return (status != DF_S_OK && status != DF_S_SIGNATURE && status != DF_S_ADDITIONAL_FRAME);
 }
 
 uint32_t nxpsc_selected_aid(const nxpsc_card_t *card) {
@@ -445,18 +457,33 @@ int nxpsc_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t 
     card->mode = tx_mode;
     card->mac_mismatch = false;
 
+    // the card dropped the session under us, a MACed or enciphered frame would
+    // only be read as trailing garbage. say so here instead of on the wire
+    if (card->session_lost && (tx_mode != MODE_PLAIN || rx_mode != MODE_PLAIN)) {
+        free(wrapped);
+        free(raw);
+        if (resp_len != NULL) {
+            *resp_len = 0;
+        }
+        return NXPSC_E_AUTH;
+    }
+
     int rc = nxpsc_channel_encode(card, cmd, data, len, wrapped, NXPSC_MAX_RESPONSE, &wrapped_len);
     if (rc == NXPSC_OK) {
         rc = nxpsc_raw_exchange(card, cmd, wrapped, wrapped_len, &status, raw, NXPSC_MAX_RESPONSE, &raw_len);
     }
 
-    if (rc == NXPSC_OK && status != DF_S_ADDITIONAL_FRAME && card->authenticated &&
-            (card->channel == NXPSC_CHAN_EV2 || card->channel == NXPSC_CHAN_LRP)) {
-        card->cmd_ctr++;
-    }
-
-    if (rc == NXPSC_OK && status != DF_S_OK && status != DF_S_SIGNATURE) {
+    if (rc == NXPSC_OK && nxpsc_status_ends_session(status)) {
+        if (card->authenticated) {
+            nxpsc_reset_channel(card);
+            card->session_lost = true;
+        }
         rc = NXPSC_E_CARD;
+    } else if (rc == NXPSC_OK && status != DF_S_ADDITIONAL_FRAME && card->authenticated &&
+               (card->channel == NXPSC_CHAN_EV2 || card->channel == NXPSC_CHAN_LRP)) {
+        // only a command the PICC actually carried out advances the counter,
+        // and the response MAC is computed over the advanced value
+        card->cmd_ctr++;
     }
 
     if (rc == NXPSC_OK) {

@@ -93,6 +93,54 @@ static void mock_secure_ctx(const mock_card_t *mock, nxpsc_card_t *card) {
     card->cmd_ctr = mock->secure_cmd_ctr;
 }
 
+// the PICC throws the secure messaging session away as soon as it answers an
+// in session command with an error, everything after that is unauthenticated
+static void mock_secure_abort(mock_card_t *mock) {
+    mock->secure_active = false;
+    mock->secure_channel = NXPSC_CHAN_AUTO;
+    mock->secure_cmd_ctr = 0;
+    memset(mock->secure_session_enc, 0, sizeof(mock->secure_session_enc));
+    memset(mock->secure_session_mac, 0, sizeof(mock->secure_session_mac));
+    memset(mock->secure_iv, 0, sizeof(mock->secure_iv));
+    memset(mock->secure_ti, 0, sizeof(mock->secure_ti));
+}
+
+// the PICC derives the session key on its own. a 2TDEA key whose two halves
+// are equal is a DES key to the silicon, which is the rule the library has to
+// mirror and the only place a wrong derivation ever shows up
+static void mock_secure_establish_legacy(mock_card_t *mock, const uint8_t *rnd_a) {
+    uint8_t session[NXPSC_MAX_KEY_SIZE] = {0};
+    nxpsc_keytype_t type = mock->auth_key_type;
+
+    if (type == NXPSC_KEY_2K3DES && nxpsc_memeq(mock->auth_key, mock->auth_key + 8, 8)) {
+        nxpsc_session_key_d40(rnd_a, mock->auth_rnd_b, NXPSC_KEY_DES, session);
+        memcpy(session + 8, session, 8);
+    } else {
+        nxpsc_session_key_d40(rnd_a, mock->auth_rnd_b, type, session);
+    }
+
+    mock->secure_active = true;
+    mock->secure_channel = (mock->auth_cmd == DF_AUTHENTICATE) ? NXPSC_CHAN_D40 : NXPSC_CHAN_EV1;
+    mock->secure_key_type = type;
+    memcpy(mock->secure_session_enc, session, nxpsc_key_size(type));
+    memcpy(mock->secure_session_mac, session, nxpsc_key_size(type));
+    memset(mock->secure_iv, 0, sizeof(mock->secure_iv));
+    mock->secure_cmd_ctr = 0;
+}
+
+static void mock_secure_establish_ev2(mock_card_t *mock, const uint8_t *rnd_a) {
+    mock->secure_active = true;
+    mock->secure_channel = NXPSC_CHAN_EV2;
+    mock->secure_key_type = NXPSC_KEY_AES128;
+    nxpsc_session_key_ev2(mock->auth_key, rnd_a, mock->auth_rnd_b, true, mock->secure_session_enc);
+    nxpsc_session_key_ev2(mock->auth_key, rnd_a, mock->auth_rnd_b, false, mock->secure_session_mac);
+    memset(mock->secure_iv, 0, sizeof(mock->secure_iv));
+    if (mock->auth_first) {
+        memcpy(mock->secure_ti, mock->auth_ti, sizeof(mock->secure_ti));
+        mock->secure_cmd_ctr = 0;
+    }
+}
+
 static void mock_secure_advance(mock_card_t *mock) {
     if (mock->secure_active &&
             (mock->secure_channel == NXPSC_CHAN_EV2 || mock->secure_channel == NXPSC_CHAN_LRP)) {
@@ -199,24 +247,24 @@ static int mock_secure_reply(mock_card_t *mock, uint8_t cmd, nxpsc_commmode_t co
             memcpy(buf, payload, payload_len);
         }
 
-        int rc = NXPSC_OK;
+        // the enciphering is the legacy one either way, only the checksum
+        // differs. EV1 and later silicon answers GetCardUID with a CRC32 over
+        // data || status even while the session is a legacy one
         if (d40_ev1_style) {
             uint8_t crc_input[NXPSC_MAX_RESPONSE + 1] = {0};
-            uint8_t iv[NXPSC_MAX_BLOCK] = {0};
 
             if (payload_len > 0) {
                 memcpy(crc_input, payload, payload_len);
             }
             crc_input[payload_len] = status;
             nxpsc_crc32(crc_input, payload_len + 1, buf + payload_len);
-            memcpy(iv, mock->secure_iv, sizeof(iv));
-            rc = nxpsc_cbc_crypt(ctx.key_type, ctx.session_enc, iv, buf, plen, rx + 1, true);
         } else {
-            uint8_t iv[NXPSC_MAX_BLOCK] = {0};
             nxpsc_crc16(buf, payload_len, buf + payload_len);
-            rc = nxpsc_cbc_crypt_ex(ctx.key_type, ctx.session_enc, iv, buf, plen, rx + 1,
-                                    true, true);
         }
+
+        uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+        int rc = nxpsc_cbc_crypt_ex(ctx.key_type, ctx.session_enc, iv, buf, plen, rx + 1,
+                                    true, true);
         if (rc != NXPSC_OK) {
             return rc;
         }
@@ -522,6 +570,7 @@ static int auth_continue_legacy(mock_card_t *mock, const uint8_t *tx, size_t tx_
     }
 
     *rx_len = rnd_len + 1;
+    mock_secure_establish_legacy(mock, rnd_a);
     auth_abort(mock);
     return NXPSC_OK;
 }
@@ -559,6 +608,7 @@ static int auth_continue_ev2(mock_card_t *mock, const uint8_t *tx, size_t tx_len
     }
 
     *rx_len = plain_len + 1;
+    mock_secure_establish_ev2(mock, rnd_a);
     auth_abort(mock);
     return NXPSC_OK;
 }
@@ -731,8 +781,10 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
     }
 
     if (mock_has_valid_ev2_request_mac(mock, tx, tx_len) == false) {
-        return mock_secure_reply(mock, tx[0], NXPSC_COMM_PLAIN, NULL, 0, 0x1E, false,
-                                 rx, cap, rx_len);
+        int rc = mock_secure_reply(mock, tx[0], NXPSC_COMM_PLAIN, NULL, 0, 0x1E, false,
+                                   rx, cap, rx_len);
+        mock_secure_abort(mock);
+        return rc;
     }
 
     mock_update_ev1_request_iv(mock, tx[0], tx, tx_len);
@@ -1020,7 +1072,7 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
         int rc = mock_secure_reply(mock, tx[0], NXPSC_COMM_PLAIN, NULL, 0, mock->reject_status,
                                    false, rx, cap, rx_len);
         mock->reject_cmd = 0;
-        mock_secure_advance(mock);
+        mock_secure_abort(mock);
         return rc;
     }
 
