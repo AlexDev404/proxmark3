@@ -822,7 +822,7 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             if (cap < 7) {
                 return NXPSC_E_LENGTH;
             }
-            if (mock->secure_active &&
+            if (mock->secure_active && tx_len >= 9 &&
                     (mock->secure_channel == NXPSC_CHAN_EV2 || mock->secure_channel == NXPSC_CHAN_LRP)) {
                 uint8_t payload[6] = {0x01, 0x02, 0x03, 0x11, 0x22, 0x33};
                 int rc = mock_secure_reply(mock, tx[0], NXPSC_COMM_MAC, payload, sizeof(payload),
