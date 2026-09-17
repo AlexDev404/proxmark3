@@ -252,8 +252,6 @@ static void test_create_file_framing(void) {
     mock_card_t mock;
     nxpsc_transport_t transport;
     nxpsc_card_t *card = NULL;
-    uint8_t uid[16] = {0};
-    size_t uid_len = 0;
 
     mock_init(&mock, DESFIRE_EV2);
     mock_transport(&mock, &transport);
@@ -396,6 +394,8 @@ static void test_guards(void) {
     mock_card_t mock;
     nxpsc_transport_t transport;
     nxpsc_card_t *card = NULL;
+    uint8_t uid[16] = {0};
+    size_t uid_len = 0;
 
     mock_init(&mock, DESFIRE_EV2);
     mock_transport(&mock, &transport);
