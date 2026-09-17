@@ -18,6 +18,8 @@
 //-----------------------------------------------------------------------------
 
 #include "mockcard.h"
+#include "nxpsc_crypto.h"
+#include "nxpsc_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -29,6 +31,102 @@ static void check(const char *name, bool ok) {
     if (ok == false) {
         failures++;
     }
+}
+
+typedef struct {
+    uint8_t key[16];
+    uint8_t rnd_b[16];
+    uint8_t ti[4];
+    bool corrupt_final;
+} plus_auth_ctx_t;
+
+static int fixed_rng(void *ctx, uint8_t *out, size_t len) {
+    (void)ctx;
+    for (size_t i = 0; i < len; i++) {
+        out[i] = (uint8_t)(0x10 + i);
+    }
+    return NXPSC_OK;
+}
+
+static int plus_auth_transceive(void *ctx, const uint8_t *tx, size_t tx_len,
+                                uint8_t *rx, size_t cap, size_t *rx_len) {
+    plus_auth_ctx_t *auth = (plus_auth_ctx_t *)ctx;
+
+    if (tx_len == 0 || cap < 1) {
+        return NXPSC_E_PARAM;
+    }
+
+    if (tx[0] == 0x70) {
+        if (cap < 17) {
+            return NXPSC_E_LENGTH;
+        }
+
+        uint8_t iv[16] = {0};
+        rx[0] = 0x90;
+        if (nxpsc_cbc_crypt(NXPSC_KEY_AES128, auth->key, iv, auth->rnd_b, 16, rx + 1, true) != NXPSC_OK) {
+            return NXPSC_E_CRYPTO;
+        }
+        *rx_len = 17;
+        return NXPSC_OK;
+    }
+
+    if (tx[0] == 0xAF) {
+        if (tx_len != 33 || cap < 33) {
+            return NXPSC_E_LENGTH;
+        }
+
+        uint8_t iv[16] = {0};
+        uint8_t plain[32] = {0};
+        if (nxpsc_cbc_crypt(NXPSC_KEY_AES128, auth->key, iv, tx + 1, 32, plain, false) != NXPSC_OK) {
+            return NXPSC_E_CRYPTO;
+        }
+
+        uint8_t expect_rot_b[16] = {0};
+        memcpy(expect_rot_b, auth->rnd_b + 1, 15);
+        expect_rot_b[15] = auth->rnd_b[0];
+        if (memcmp(plain + 16, expect_rot_b, 16) != 0) {
+            return NXPSC_E_AUTH;
+        }
+
+        uint8_t reply[32] = {0};
+        memcpy(reply, auth->ti, sizeof(auth->ti));
+        memcpy(reply + 4, plain + 1, 15);
+        reply[19] = plain[0];
+
+        memset(iv, 0, sizeof(iv));
+        rx[0] = 0x90;
+        if (nxpsc_cbc_crypt(NXPSC_KEY_AES128, auth->key, iv, reply, 32, rx + 1, true) != NXPSC_OK) {
+            return NXPSC_E_CRYPTO;
+        }
+        if (auth->corrupt_final) {
+            rx[1] ^= 0x80;
+        }
+        *rx_len = 33;
+        return NXPSC_OK;
+    }
+
+    return NXPSC_E_PARAM;
+}
+
+typedef struct {
+    uint8_t payload[16];
+    size_t payload_len;
+} plus_read_ctx_t;
+
+static int plus_read_transceive(void *ctx, const uint8_t *tx, size_t tx_len,
+                                uint8_t *rx, size_t cap, size_t *rx_len) {
+    plus_read_ctx_t *read = (plus_read_ctx_t *)ctx;
+    (void)tx;
+    (void)tx_len;
+
+    if (cap < read->payload_len + 1) {
+        return NXPSC_E_LENGTH;
+    }
+
+    rx[0] = 0x90;
+    memcpy(rx + 1, read->payload, read->payload_len);
+    *rx_len = read->payload_len + 1;
+    return NXPSC_OK;
 }
 
 // identification must work for every card family the library claims to support
@@ -154,6 +252,8 @@ static void test_create_file_framing(void) {
     mock_card_t mock;
     nxpsc_transport_t transport;
     nxpsc_card_t *card = NULL;
+    uint8_t uid[16] = {0};
+    size_t uid_len = 0;
 
     mock_init(&mock, DESFIRE_EV2);
     mock_transport(&mock, &transport);
@@ -304,10 +404,13 @@ static void test_guards(void) {
     // commands that require a session must refuse without one
     ok = ok && (nxpsc_change_key_settings(card, 0x0F) == NXPSC_E_AUTH);
     ok = ok && (nxpsc_set_configuration(card, 0x00, NULL, 0) == NXPSC_E_AUTH);
+    ok = ok && (nxpsc_select_application(card, 0x01000000) == NXPSC_E_LENGTH);
+    ok = ok && (nxpsc_read_data(card, 0x01, 0x01000000, 1, NXPSC_COMM_PLAIN,
+                                uid, sizeof(uid), &uid_len) == NXPSC_E_LENGTH);
+    ok = ok && (nxpsc_pack_access(NULL) == 0);
+    nxpsc_unpack_access(0xFFFF, NULL);
 
     // without a session GetCardUID falls back to the UID the transport knows
-    uint8_t uid[16] = {0};
-    size_t uid_len = 0;
     ok = ok && (nxpsc_get_card_uid(card, uid, sizeof(uid), &uid_len) == NXPSC_OK);
     ok = ok && (uid_len == 7) && (uid[0] == 0x04);
 
@@ -428,7 +531,7 @@ static void test_proximity_check(void) {
     // a wrong card MAC must be reported, not silently accepted
     mock.pc_bad_mac = true;
     mac_ok = true;
-    ok = ok && (nxpsc_proximity_check(card, &pc_key, 2, &mac_ok) == NXPSC_OK);
+    ok = ok && (nxpsc_proximity_check(card, &pc_key, 2, &mac_ok) == NXPSC_E_AUTH);
     ok = ok && (mac_ok == false);
     mock.pc_bad_mac = false;
 
@@ -436,6 +539,95 @@ static void test_proximity_check(void) {
     ok = ok && (nxpsc_proximity_check(card, &pc_key, 9, NULL) == NXPSC_E_PARAM);
 
     check("proximity check", ok);
+    nxpsc_close(card);
+}
+
+static void test_secure_channel_guards(void) {
+    nxpsc_card_t card;
+    memset(&card, 0, sizeof(card));
+    card.last_cmd = DF_READ_DATA;
+    card.mode = MODE_MAC;
+
+    uint8_t out[16] = {0};
+    size_t out_len = 0;
+    bool ok = true;
+
+    card.channel = NXPSC_CHAN_D40;
+    card.key_type = NXPSC_KEY_2K3DES;
+    ok = ok && (nxpsc_channel_decode(&card, out, 4, 0x00, out, sizeof(out), &out_len) == NXPSC_E_LENGTH);
+
+    card.channel = NXPSC_CHAN_EV1;
+    card.key_type = NXPSC_KEY_AES128;
+    ok = ok && (nxpsc_channel_decode(&card, out, 7, 0x00, out, sizeof(out), &out_len) == NXPSC_E_LENGTH);
+
+    card.channel = NXPSC_CHAN_EV2;
+    ok = ok && (nxpsc_channel_decode(&card, out, 7, 0x00, out, sizeof(out), &out_len) == NXPSC_E_LENGTH);
+
+    check("secure channel short MAC rejection", ok);
+}
+
+static void test_plus_authentication(void) {
+    plus_auth_ctx_t ctx = {
+        .key = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
+        .rnd_b = {0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+                  0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F},
+        .ti = {0xDE, 0xAD, 0xBE, 0xEF},
+    };
+    nxpsc_transport_t transport = {
+        .ctx = &ctx,
+        .transceive = plus_auth_transceive,
+    };
+    nxpsc_card_t *card = NULL;
+    nxpsc_key_t key = {.type = NXPSC_KEY_AES128};
+    memcpy(key.data, ctx.key, sizeof(ctx.key));
+
+    nxpsc_set_rng(fixed_rng, NULL);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    ok = ok && (nxpsc_plus_authenticate(card, 0x4000, &key, true) == NXPSC_OK);
+    ok = ok && nxpsc_is_authenticated(card);
+    nxpsc_close(card);
+
+    ctx.corrupt_final = true;
+    card = NULL;
+    ok = ok && (nxpsc_open(&transport, &card) == NXPSC_OK);
+    ok = ok && (nxpsc_plus_authenticate(card, 0x4000, &key, true) == NXPSC_E_AUTH);
+    ok = ok && (nxpsc_is_authenticated(card) == false);
+    nxpsc_close(card);
+
+    nxpsc_set_rng(NULL, NULL);
+    check("MIFARE Plus auth cryptogram check", ok);
+}
+
+static void test_plus_missing_mac(void) {
+    plus_read_ctx_t ctx = {
+        .payload = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
+        .payload_len = 16,
+    };
+    nxpsc_transport_t transport = {
+        .ctx = &ctx,
+        .transceive = plus_read_transceive,
+    };
+    nxpsc_card_t *card = NULL;
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok) {
+        card->authenticated = true;
+        card->key_type = NXPSC_KEY_AES128;
+        card->channel = NXPSC_CHAN_EV2;
+        memcpy(card->session_mac, ctx.payload, 16);
+        memcpy(card->session_enc, ctx.payload, 16);
+        memcpy(card->ti, "\x01\x02\x03\x04", 4);
+    }
+
+    uint8_t out[16] = {0};
+    size_t out_len = 0;
+    ok = ok && (nxpsc_plus_read(card, 0x0004, 1, false, true, out, sizeof(out), &out_len)
+                == NXPSC_E_LENGTH);
+
+    check("MIFARE Plus missing MAC rejection", ok);
     nxpsc_close(card);
 }
 
@@ -568,6 +760,9 @@ int main(void) {
     test_plus_perso();
     test_advanced_commands();
     test_proximity_check();
+    test_secure_channel_guards();
+    test_plus_authentication();
+    test_plus_missing_mac();
     test_delegation_and_config();
     test_plus_extras();
     test_guards();

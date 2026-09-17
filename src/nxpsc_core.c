@@ -188,7 +188,7 @@ void nxpsc_close(nxpsc_card_t *card) {
         return;
     }
     // key material must not linger in the heap
-    memset(card, 0, sizeof(*card));
+    nxpsc_secure_zero(card, sizeof(*card));
     free(card);
 }
 

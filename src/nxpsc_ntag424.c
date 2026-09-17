@@ -38,6 +38,10 @@ static void put_u24(uint8_t *out, uint32_t value) {
     out[2] = (uint8_t)((value >> 16) & 0xFF);
 }
 
+static bool fits_u24(uint32_t value) {
+    return (value & 0xFF000000U) == 0;
+}
+
 int nxpsc_ntag424_select(nxpsc_card_t *card) {
     if (card == NULL) {
         return NXPSC_E_PARAM;
@@ -60,6 +64,17 @@ int nxpsc_sdm_build_settings(nxpsc_commmode_t comm, const nxpsc_access_t *access
                              uint8_t *out, size_t cap, size_t *out_len) {
     if (access == NULL || out == NULL || out_len == NULL) {
         return NXPSC_E_PARAM;
+    }
+    if (sdm != NULL &&
+            (fits_u24(sdm->uid_offset) == false ||
+             fits_u24(sdm->counter_offset) == false ||
+             fits_u24(sdm->picc_data_offset) == false ||
+             fits_u24(sdm->mac_input_offset) == false ||
+             fits_u24(sdm->enc_offset) == false ||
+             fits_u24(sdm->enc_length) == false ||
+             fits_u24(sdm->mac_offset) == false ||
+             fits_u24(sdm->read_counter_limit_value) == false)) {
+        return NXPSC_E_LENGTH;
     }
     if (cap < 3) {
         return NXPSC_E_LENGTH;

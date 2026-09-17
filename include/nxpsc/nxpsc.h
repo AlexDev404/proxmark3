@@ -382,8 +382,9 @@ int nxpsc_init_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t num_keys,
 int nxpsc_finalize_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t key_set_version);
 int nxpsc_roll_key_set(nxpsc_card_t *card, uint8_t key_set);
 
-// proximity check, the relay attack countermeasure. rounds is 1 to 8, mac_ok
-// receives whether the card answer MAC matched and may be NULL
+// proximity check, the relay attack countermeasure. rounds is 1 to 8. the call
+// fails when the card answer MAC does not verify; mac_ok receives the same
+// verification result and may be NULL
 int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t rounds,
                           bool *mac_ok);
 

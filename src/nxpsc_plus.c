@@ -205,16 +205,41 @@ int nxpsc_plus_authenticate(nxpsc_card_t *card, uint16_t key_block, const nxpsc_
     if (rc != NXPSC_OK) {
         return rc;
     }
-    if (resp_len < 17) {
+    if (resp_len != (size_t)(first ? 33 : 17)) {
         return NXPSC_E_LENGTH;
     }
 
     uint8_t raw[32] = {0};
     memcpy(iv, iv_read, sizeof(iv));
     rc = nxpsc_cbc_crypt(NXPSC_KEY_AES128, key->data, iv, resp + 1,
-                         (resp_len - 1 >= 32) ? 32 : 16, raw, false);
+                         resp_len - 1, raw, false);
     if (rc != NXPSC_OK) {
         return rc;
+    }
+
+    uint8_t ret_rnd_a[16] = {0};
+    if (first) {
+        ret_rnd_a[0] = raw[19];
+        memcpy(ret_rnd_a + 1, raw + 4, 15);
+        if (nxpsc_memeq(rnd_a, ret_rnd_a, 16) == false) {
+            nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+            nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+            nxpsc_secure_zero(plain, sizeof(plain));
+            nxpsc_secure_zero(raw, sizeof(raw));
+            nxpsc_secure_zero(ret_rnd_a, sizeof(ret_rnd_a));
+            return NXPSC_E_AUTH;
+        }
+    } else {
+        ret_rnd_a[0] = raw[15];
+        memcpy(ret_rnd_a + 1, raw, 15);
+        if (nxpsc_memeq(rnd_a, ret_rnd_a, 16) == false) {
+            nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+            nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+            nxpsc_secure_zero(plain, sizeof(plain));
+            nxpsc_secure_zero(raw, sizeof(raw));
+            nxpsc_secure_zero(ret_rnd_a, sizeof(ret_rnd_a));
+            return NXPSC_E_AUTH;
+        }
     }
 
     // Kenc and Kmac, MF1P(H)x1 data sheet section 9.3
@@ -254,6 +279,12 @@ int nxpsc_plus_authenticate(nxpsc_card_t *card, uint16_t key_block, const nxpsc_
     card->key_no = (uint8_t)(key_block & 0xFF);
     card->channel = NXPSC_CHAN_EV2;
     card->authenticated = true;
+    nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+    nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+    nxpsc_secure_zero(plain, sizeof(plain));
+    nxpsc_secure_zero(raw, sizeof(raw));
+    nxpsc_secure_zero(ret_rnd_a, sizeof(ret_rnd_a));
+    nxpsc_secure_zero(sv, sizeof(sv));
     return NXPSC_OK;
 }
 
@@ -312,13 +343,16 @@ int nxpsc_plus_read(nxpsc_card_t *card, uint16_t block, uint8_t count, bool encr
         memcpy(out, resp + 1, payload);
     }
 
-    if (maced && resp_len >= payload + 9) {
+    if (maced) {
+        if (resp_len < payload + 9) {
+            return NXPSC_E_LENGTH;
+        }
         uint8_t expected[8] = {0};
         rc = plus_mac(card, MAC_READ_RESP, block, count, resp, payload + 1, expected);
         if (rc != NXPSC_OK) {
             return rc;
         }
-        card->mac_mismatch = (memcmp(expected, resp + 1 + payload, 8) != 0);
+        card->mac_mismatch = !nxpsc_memeq(expected, resp + 1 + payload, 8);
     }
 
     card->plus_r_ctr++;
