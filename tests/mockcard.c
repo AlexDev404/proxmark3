@@ -991,14 +991,17 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             return NXPSC_OK;
 
         case 0xF0:                      // PreparePC
-            if (cap < 4) {
+            if (cap < 5) {
                 return NXPSC_E_LENGTH;
             }
+            // what an EV3 answers: Option, a two byte published response time
+            // and, because bit 0 of Option is set, a PPS1 byte
             rx[0] = 0x00;
-            rx[1] = 0x01;               // option bytes
-            rx[2] = 0x02;
-            rx[3] = 0x03;
-            *rx_len = 4;
+            rx[1] = 0x01;               // Option
+            rx[2] = 0x03;               // published response time, high
+            rx[3] = 0x20;               // published response time, low
+            rx[4] = 0x0A;               // PPS1
+            *rx_len = 5;
             mock->pc_len = 0;
             return NXPSC_OK;
 
@@ -1026,8 +1029,8 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
         }
 
         case 0xFD: {                    // VerifyPC, answer with the response MAC
-            uint8_t input[1 + 3 + 16] = {0x90, 0x01, 0x02, 0x03};
-            size_t input_len = 4;
+            uint8_t input[1 + 4 + 16] = {0x90, 0x01, 0x03, 0x20, 0x0A};
+            size_t input_len = 5;
 
             memcpy(input + input_len, mock->pc_exchanged, mock->pc_len);
             input_len += mock->pc_len;

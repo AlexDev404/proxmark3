@@ -314,10 +314,35 @@ int nxpsc_roll_key_set(nxpsc_card_t *card, uint8_t key_set) {
 //-----------------------------------------------------------------------------
 // proximity check, the relay attack countermeasure of EV2 and later
 //-----------------------------------------------------------------------------
+// The proximity check exchange answers 0x90 rather than 0x00 on EV3, which is
+// the same value the library calls DF_S_SIGNATURE elsewhere. SpringCard, who
+// build readers for this silicon, treat an SW of 0x9190 from PreparePC as
+// success, and the response MAC is computed over that status, so accept both.
+//
+// With this the whole exchange runs on EV3: PreparePC answers 0x90 with
+// Option, a two byte published response time and PPS1, the rounds are
+// answered, and VerifyPC returns eight bytes. What does not yet work is
+// verifying those eight bytes, and nxpsc_proximity_check() reports that
+// honestly through mac_ok rather than calling the check passed.
+//
+// The MAC input is not simply a field ordering question. 456 combinations of
+// truncation, random interleaving and header layout were tried against two
+// captured exchanges and none reproduces the card's answer. The likely reason
+// is that the proximity check belongs to the Virtual Card protocol rather than
+// to a DESFire application session: SpringCard reach it through ISOSelect with
+// an installation identifier followed by IsoExternalAuthenticate, using a
+// separate VC proximity key, none of which this library implements yet.
+static bool pc_status_ok(uint8_t status) {
+    return (status == DF_S_OK || status == DF_S_SIGNATURE);
+}
+
 int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t rounds,
                           bool *mac_ok) {
 
-    if (card == NULL || pc_key == NULL || rounds < 1 || rounds > PC_MAX_ROUNDS) {
+    // the challenge is split evenly, so only a round count that divides 8
+    // produces equal chunks. LogicalAccess asserts the same set
+    if (card == NULL || pc_key == NULL ||
+            (rounds != 1 && rounds != 2 && rounds != 4 && rounds != PC_MAX_ROUNDS)) {
         return NXPSC_E_PARAM;
     }
     if (pc_key->type != NXPSC_KEY_AES128) {
@@ -343,13 +368,25 @@ int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t
     if (rc != NXPSC_OK) {
         return rc;
     }
-    if (status != DF_S_OK) {
+    if (pc_status_ok(status) == false) {
         nxpsc_reset_channel(card);
         return NXPSC_E_CARD;
     }
 
-    size_t opt_len = (prep_len < 3) ? prep_len : 3;
-    bool has_ext = (prep_len > 3);
+    if (prep_len < 3) {
+        nxpsc_reset_channel(card);
+        return NXPSC_E_LENGTH;
+    }
+
+    // bit 0 of the Option byte is what says a PPS1 byte follows, rather than
+    // the response simply being longer. EV3 answers 01 03 20 0A, so Option
+    // 0x01, a published response time of 0x0320 and PPS1 0x0A
+    size_t opt_len = 3;
+    bool has_ext = (prep[0] & 0x01) != 0;
+    if (has_ext && prep_len < 4) {
+        nxpsc_reset_channel(card);
+        return NXPSC_E_LENGTH;
+    }
     uint8_t ext = has_ext ? prep[3] : 0x00;
 
     // the challenge is split over the requested number of rounds, the card
@@ -380,7 +417,7 @@ int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t
         if (rc != NXPSC_OK) {
             return rc;
         }
-        if (status != DF_S_OK) {
+        if (pc_status_ok(status) == false) {
             nxpsc_reset_channel(card);
             return NXPSC_E_CARD;
         }
@@ -419,7 +456,7 @@ int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t
     if (rc != NXPSC_OK) {
         return rc;
     }
-    if (status != DF_S_OK) {
+    if (pc_status_ok(status) == false) {
         nxpsc_reset_channel(card);
         return NXPSC_E_CARD;
     }
