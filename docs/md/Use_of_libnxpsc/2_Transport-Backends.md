@@ -55,9 +55,10 @@ ISO 7816-4 APDU. Call
 nxpsc_set_cmdset(card, NXPSC_CMDSET_NATIVE_ISO);
 ```
 
-and the library wraps every native command as `90 cmd 00 00 Lc data 00`, which
-every DESFire from EV1 on accepts. Chaining then uses `61 xx` / `90 AF` instead
-of a bare `AF`, which the library also handles.
+and the library wraps every native command as `90 cmd 00 00 00` when there is
+no data or `90 cmd 00 00 Lc data 00` when data is present, which every DESFire
+from EV1 on accepts. Chaining then uses `61 xx` / `90 AF` instead of a bare
+`AF`, which the library also handles.
 
 ## Error mapping
 

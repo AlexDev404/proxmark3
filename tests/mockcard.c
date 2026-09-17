@@ -165,6 +165,38 @@ static int plus_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
 static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
                         uint8_t *rx, size_t cap, size_t *rx_len);
 
+static int iso_status(uint8_t sw2, uint8_t *rx, size_t cap, size_t *rx_len) {
+    if (cap < 2) {
+        return NXPSC_E_LENGTH;
+    }
+    rx[0] = 0x91;
+    rx[1] = sw2;
+    *rx_len = 2;
+    return NXPSC_OK;
+}
+
+static int unwrap_wrapped_native(const uint8_t *tx, size_t tx_len,
+                                 uint8_t *inner, size_t cap, size_t *inner_len) {
+    if (tx_len < 5 || cap < 1) {
+        return NXPSC_E_PARAM;
+    }
+
+    inner[0] = tx[1];
+    if (tx_len == 5) {
+        *inner_len = 1;
+        return NXPSC_OK;
+    }
+
+    size_t lc = tx[4];
+    if (lc == 0 || tx_len != 6 + lc || lc > cap - 1) {
+        return NXPSC_E_LENGTH;
+    }
+
+    memcpy(inner + 1, tx + 5, lc);
+    *inner_len = 1 + lc;
+    return NXPSC_OK;
+}
+
 int mock_transceive(void *ctx, const uint8_t *tx, size_t tx_len,
                     uint8_t *rx, size_t cap, size_t *rx_len) {
     mock_card_t *mock = (mock_card_t *)ctx;
@@ -204,20 +236,14 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             // wrapped native command, unwrap and fall through
             uint8_t inner[64] = {0};
             size_t inner_len = 0;
-
-            inner[0] = tx[1];
-            if (tx_len > 6) {
-                inner_len = tx_len - 6;
-                if (inner_len > sizeof(inner) - 1) {
-                    inner_len = sizeof(inner) - 1;
-                }
-                memcpy(inner + 1, tx + 5, inner_len);
+            int rc = unwrap_wrapped_native(tx, tx_len, inner, sizeof(inner), &inner_len);
+            if (rc != NXPSC_OK) {
+                return iso_status(0x7E, rx, cap, rx_len);
             }
 
             uint8_t native[MOCK_FRAME_SIZE] = {0};
             size_t native_len = 0;
-            int rc = native_frame(mock, inner, inner_len + 1, native, sizeof(native),
-                                  &native_len);
+            rc = native_frame(mock, inner, inner_len, native, sizeof(native), &native_len);
             if (rc != NXPSC_OK || native_len < 1) {
                 return rc;
             }

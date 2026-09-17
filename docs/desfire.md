@@ -47,7 +47,7 @@ Three things are chosen independently.
 | Value | Wire format |
 |---|---|
 | `NXPSC_CMDSET_NATIVE` | raw native frames, `cmd \|\| data` |
-| `NXPSC_CMDSET_NATIVE_ISO` | native command wrapped in an ISO 7816-4 APDU, `90 cmd 00 00 Lc data 00` |
+| `NXPSC_CMDSET_NATIVE_ISO` | native command wrapped in an ISO 7816-4 APDU, `90 cmd 00 00 00` with no data or `90 cmd 00 00 Lc data 00` when data is present |
 | `NXPSC_CMDSET_ISO` | real ISO 7816-4 commands, `SELECT`, `READ BINARY`, `UPDATE BINARY` |
 
 Some backends, PC/SC in particular, cannot send raw native frames at all. Use
