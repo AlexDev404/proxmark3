@@ -37,6 +37,28 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: libnxpsc-${{ matrix.os }}-${{ matrix.cc }}
+          path: |
+            build/**/*.a
+            build/**/*.so
+            build/**/*.dylib
+            build/**/*.dll
+            build/**/*.lib
+            build/**/*.exe
+          if-no-files-found: warn
+
+      - name: Upload test logs
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-logs-${{ matrix.os }}-${{ matrix.cc }}
+          path: build/Testing/
+          if-no-files-found: ignore
+
   warnings:
     name: warning free build
     runs-on: ubuntu-latest
@@ -51,3 +73,13 @@ jobs:
           CC=${{ matrix.cc }} cmake -S . -B build -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
           cmake --build build
           cd build && ctest --output-on-failure
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: libnxpsc-warnings-${{ matrix.cc }}
+          path: |
+            build/**/*.a
+            build/**/*.so
+          if-no-files-found: warn
