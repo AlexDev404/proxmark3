@@ -163,33 +163,54 @@ int nxpsc_select_application(nxpsc_card_t *card, uint32_t aid) {
     return rc;
 }
 
-static int create_app(nxpsc_card_t *card, uint32_t aid, uint8_t key_settings, uint8_t num_keys,
-                      nxpsc_keytype_t key_type, bool iso, uint16_t iso_fid,
-                      const uint8_t *df_name, size_t df_name_len) {
-    if (card == NULL || num_keys == 0 || num_keys > NXPSC_MAX_KEYS) {
+// CreateApplication payload, in the order the card wants it:
+//   AID(3) KeySett1 KeySett2 [KeySett3 AKSVersion NoKeySets MaxKeySize
+//   AppKeySetSett] [ISOFileID(2) ISODFName]
+// KeySett2 bit 4 announces KeySett3, and KeySett3 bit 0 announces the four key
+// set bytes. the key set block sits before the ISO fields, not after
+static int create_app(nxpsc_card_t *card, uint32_t aid, const nxpsc_app_config_t *cfg) {
+    if (card == NULL || cfg == NULL || cfg->num_keys == 0 || cfg->num_keys > NXPSC_MAX_KEYS) {
         return NXPSC_E_PARAM;
     }
     if (fits_u24(aid) == false) {
         return NXPSC_E_LENGTH;
     }
-    if (iso && df_name_len > 16) {
+    if (cfg->iso_fid_enabled && cfg->df_name_len > 16) {
         return NXPSC_E_LENGTH;
     }
+    if (cfg->df_name_len > 0 && cfg->df_name == NULL) {
+        return NXPSC_E_PARAM;
+    }
+    // a key set aware application holds at least the active set plus one more
+    if (cfg->num_key_sets == 1 || cfg->num_key_sets > NXPSC_MAX_KEYS) {
+        return NXPSC_E_PARAM;
+    }
 
-    uint8_t data[24] = {0};
+    uint8_t data[32] = {0};
     size_t len = 0;
+    bool key_sets = (cfg->num_key_sets >= 2);
 
     put_u24(data, aid);
     len = 3;
-    data[len++] = key_settings;
-    data[len++] = (uint8_t)((num_keys & 0x0F) | keytype_to_card(key_type) | (iso ? 0x20 : 0x00));
+    data[len++] = cfg->key_settings;
+    data[len++] = (uint8_t)((cfg->num_keys & 0x0F) | keytype_to_card(cfg->key_type)
+                            | (cfg->iso_fid_enabled ? 0x20 : 0x00)
+                            | (key_sets ? 0x10 : 0x00));
 
-    if (iso) {
-        data[len++] = (uint8_t)(iso_fid & 0xFF);
-        data[len++] = (uint8_t)((iso_fid >> 8) & 0xFF);
-        if (df_name_len > 0) {
-            memcpy(data + len, df_name, df_name_len);
-            len += df_name_len;
+    if (key_sets) {
+        data[len++] = 0x01;                     // KeySett3, bit 0 enables key sets
+        data[len++] = cfg->key_set_version;
+        data[len++] = cfg->num_key_sets;
+        data[len++] = cfg->max_key_size;
+        data[len++] = cfg->key_set_settings;
+    }
+
+    if (cfg->iso_fid_enabled) {
+        data[len++] = (uint8_t)(cfg->iso_fid & 0xFF);
+        data[len++] = (uint8_t)((cfg->iso_fid >> 8) & 0xFF);
+        if (cfg->df_name_len > 0) {
+            memcpy(data + len, cfg->df_name, cfg->df_name_len);
+            len += cfg->df_name_len;
         }
     }
 
@@ -201,14 +222,32 @@ static int create_app(nxpsc_card_t *card, uint32_t aid, uint8_t key_settings, ui
 
 int nxpsc_create_application(nxpsc_card_t *card, uint32_t aid, uint8_t key_settings,
                              uint8_t num_keys, nxpsc_keytype_t key_type) {
-    return create_app(card, aid, key_settings, num_keys, key_type, false, 0, NULL, 0);
+    nxpsc_app_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.key_settings = key_settings;
+    cfg.num_keys = num_keys;
+    cfg.key_type = key_type;
+    return create_app(card, aid, &cfg);
 }
 
 int nxpsc_create_application_iso(nxpsc_card_t *card, uint32_t aid, uint8_t key_settings,
                                  uint8_t num_keys, nxpsc_keytype_t key_type,
                                  uint16_t iso_fid, const uint8_t *df_name, size_t df_name_len) {
-    return create_app(card, aid, key_settings, num_keys, key_type, true, iso_fid,
-                      df_name, df_name_len);
+    nxpsc_app_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.key_settings = key_settings;
+    cfg.num_keys = num_keys;
+    cfg.key_type = key_type;
+    cfg.iso_fid_enabled = true;
+    cfg.iso_fid = iso_fid;
+    cfg.df_name = df_name;
+    cfg.df_name_len = df_name_len;
+    return create_app(card, aid, &cfg);
+}
+
+int nxpsc_create_application_ex(nxpsc_card_t *card, uint32_t aid,
+                                const nxpsc_app_config_t *config) {
+    return create_app(card, aid, config);
 }
 
 int nxpsc_delete_application(nxpsc_card_t *card, uint32_t aid) {

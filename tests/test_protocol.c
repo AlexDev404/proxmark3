@@ -814,6 +814,77 @@ static bool run_legacy_get_card_uid_case(bool ev1_style_crc) {
 // a legacy session always enciphers the same way. EV3 answers GetCardUID with
 // the legacy CRC16, confirmed against the card, but the decoder accepts the
 // EV1 style CRC32 too because later silicon is not consistent about it
+// CreateApplication has four optional blocks and the order matters. the key set
+// block sits between KeySett2 and the ISO fields, not after them
+static void test_create_application_layout(void) {
+    static const uint8_t df_name[3] = {0xAA, 0xBB, 0xCC};
+
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV3);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok == false) {
+        check("CreateApplication payload layout", false);
+        return;
+    }
+
+    // plain application, no ISO fields and no key sets
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_application(card, 0x010203, 0x0F, 3, NXPSC_KEY_AES128) == NXPSC_OK);
+    ok = ok && (mock.tx_count == 1) && (mock.tx_len[0] == 6);
+    ok = ok && (mock.tx[0][0] == DF_CREATE_APPLICATION);
+    ok = ok && (mock.tx[0][1] == 0x03) && (mock.tx[0][2] == 0x02) && (mock.tx[0][3] == 0x01);
+    ok = ok && (mock.tx[0][4] == 0x0F);
+    ok = ok && (mock.tx[0][5] == (0x03 | 0x80));
+
+    // ISO fid and DF name, still no key sets
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_application_iso(card, 0x010203, 0x0F, 3, NXPSC_KEY_AES128,
+                                             0xE110, df_name, sizeof(df_name)) == NXPSC_OK);
+    ok = ok && (mock.tx_count == 1) && (mock.tx_len[0] == 11);
+    ok = ok && (mock.tx[0][5] == (0x03 | 0x80 | 0x20));
+    ok = ok && (mock.tx[0][6] == 0x10) && (mock.tx[0][7] == 0xE1);
+    ok = ok && (memcmp(&mock.tx[0][8], df_name, sizeof(df_name)) == 0);
+
+    // key sets, announced by bit 4 of KeySett2, block placed before the ISO fields
+    nxpsc_app_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.key_settings = 0x0F;
+    cfg.num_keys = 3;
+    cfg.key_type = NXPSC_KEY_AES128;
+    cfg.iso_fid_enabled = true;
+    cfg.iso_fid = 0xE110;
+    cfg.df_name = df_name;
+    cfg.df_name_len = sizeof(df_name);
+    cfg.num_key_sets = 2;
+    cfg.key_set_version = 0x11;
+    cfg.max_key_size = 16;
+    cfg.key_set_settings = 0x22;
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_application_ex(card, 0x010203, &cfg) == NXPSC_OK);
+    ok = ok && (mock.tx_count == 1) && (mock.tx_len[0] == 16);
+    ok = ok && (mock.tx[0][5] == (0x03 | 0x80 | 0x20 | 0x10));
+    ok = ok && (mock.tx[0][6] == 0x01);     // KeySett3, key sets enabled
+    ok = ok && (mock.tx[0][7] == 0x11);     // AKSVersion
+    ok = ok && (mock.tx[0][8] == 0x02);     // NoKeySets
+    ok = ok && (mock.tx[0][9] == 16);       // MaxKeySize
+    ok = ok && (mock.tx[0][10] == 0x22);    // AppKeySetSett
+    ok = ok && (mock.tx[0][11] == 0x10) && (mock.tx[0][12] == 0xE1);
+    ok = ok && (memcmp(&mock.tx[0][13], df_name, sizeof(df_name)) == 0);
+
+    // one key set is not a set, the caller meant either none or at least two
+    cfg.num_key_sets = 1;
+    ok = ok && (nxpsc_create_application_ex(card, 0x010203, &cfg) == NXPSC_E_PARAM);
+
+    check("CreateApplication payload layout", ok);
+    nxpsc_close(card);
+}
+
 static void test_legacy_get_card_uid(void) {
     check("legacy GetCardUID, CRC16 payload", run_legacy_get_card_uid_case(false));
     check("legacy GetCardUID, CRC32 payload", run_legacy_get_card_uid_case(true));
@@ -1141,6 +1212,7 @@ int main(void) {
     test_proximity_check();
     test_secure_channel_guards();
     test_secure_channel_exact_buffers();
+    test_create_application_layout();
     test_legacy_get_card_uid();
     test_legacy_des_degraded_session_key();
     test_session_abort_on_card_error();

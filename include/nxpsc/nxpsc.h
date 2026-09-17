@@ -280,6 +280,29 @@ int nxpsc_create_application(nxpsc_card_t *card, uint32_t aid, uint8_t key_setti
 int nxpsc_create_application_iso(nxpsc_card_t *card, uint32_t aid, uint8_t key_settings,
                                  uint8_t num_keys, nxpsc_keytype_t key_type,
                                  uint16_t iso_fid, const uint8_t *df_name, size_t df_name_len);
+// full CreateApplication payload. the two calls above are the common cases,
+// this one reaches the fields they leave out, key sets above all: an
+// application only accepts nxpsc_init_key_set() and the rest of the key set
+// commands when it was created with num_key_sets >= 2
+typedef struct {
+    uint8_t key_settings;           // KeySettings1
+    uint8_t num_keys;               // 1 to 14
+    nxpsc_keytype_t key_type;
+
+    bool iso_fid_enabled;
+    uint16_t iso_fid;
+    const uint8_t *df_name;         // up to 16 bytes, may be NULL
+    size_t df_name_len;
+
+    // key sets, EV2 and later. 0 leaves the application without them
+    uint8_t num_key_sets;           // 2 to 16
+    uint8_t key_set_version;        // AKSVersion, the active set's version
+    uint8_t max_key_size;           // 8, 16 or 24
+    uint8_t key_set_settings;       // AppKeySetSett
+} nxpsc_app_config_t;
+
+int nxpsc_create_application_ex(nxpsc_card_t *card, uint32_t aid,
+                                const nxpsc_app_config_t *config);
 int nxpsc_delete_application(nxpsc_card_t *card, uint32_t aid);
 int nxpsc_get_application_ids(nxpsc_card_t *card, uint32_t *aids, size_t cap, size_t *count);
 int nxpsc_get_df_names(nxpsc_card_t *card, nxpsc_app_t *apps, size_t cap, size_t *count);
