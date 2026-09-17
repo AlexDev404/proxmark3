@@ -44,6 +44,8 @@ typedef struct {
 
 size_t nxpsc_block_size(nxpsc_keytype_t type);
 bool nxpsc_key_is_valid(const nxpsc_key_t *key);
+bool nxpsc_memeq(const uint8_t *a, const uint8_t *b, size_t len);
+void nxpsc_secure_zero(void *buf, size_t len);
 
 int nxpsc_random_bytes(uint8_t *out, size_t len);
 // deterministic RNG override, used by the self tests and by callers that need

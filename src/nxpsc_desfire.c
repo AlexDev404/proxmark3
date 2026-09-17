@@ -47,6 +47,10 @@ static uint32_t get_u24(const uint8_t *in) {
     return (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16);
 }
 
+static bool fits_u24(uint32_t value) {
+    return (value & 0xFF000000U) == 0;
+}
+
 static void put_u32(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value & 0xFF);
     out[1] = (uint8_t)((value >> 8) & 0xFF);
@@ -87,11 +91,17 @@ static nxpsc_keytype_t keytype_from_card(uint8_t raw) {
 }
 
 uint16_t nxpsc_pack_access(const nxpsc_access_t *access) {
+    if (access == NULL) {
+        return 0;
+    }
     return (uint16_t)(((access->read & 0x0F) << 12) | ((access->write & 0x0F) << 8) |
                       ((access->read_write & 0x0F) << 4) | (access->change & 0x0F));
 }
 
 void nxpsc_unpack_access(uint16_t raw, nxpsc_access_t *access) {
+    if (access == NULL) {
+        return;
+    }
     access->read = (uint8_t)((raw >> 12) & 0x0F);
     access->write = (uint8_t)((raw >> 8) & 0x0F);
     access->read_write = (uint8_t)((raw >> 4) & 0x0F);
@@ -130,6 +140,9 @@ int nxpsc_select_application(nxpsc_card_t *card, uint32_t aid) {
     if (card == NULL) {
         return NXPSC_E_PARAM;
     }
+    if (fits_u24(aid) == false) {
+        return NXPSC_E_LENGTH;
+    }
 
     uint8_t data[3];
     put_u24(data, aid);
@@ -152,6 +165,9 @@ static int create_app(nxpsc_card_t *card, uint32_t aid, uint8_t key_settings, ui
                       const uint8_t *df_name, size_t df_name_len) {
     if (card == NULL || num_keys == 0 || num_keys > NXPSC_MAX_KEYS) {
         return NXPSC_E_PARAM;
+    }
+    if (fits_u24(aid) == false) {
+        return NXPSC_E_LENGTH;
     }
     if (iso && df_name_len > 16) {
         return NXPSC_E_LENGTH;
@@ -682,6 +698,9 @@ static int create_file(nxpsc_card_t *card, uint8_t cmd, uint8_t file_no, uint16_
 
 int nxpsc_create_std_file(nxpsc_card_t *card, uint8_t file_no, uint16_t iso_fid,
                           nxpsc_commmode_t comm, const nxpsc_access_t *access, uint32_t size) {
+    if (fits_u24(size) == false) {
+        return NXPSC_E_LENGTH;
+    }
     uint8_t tail[3];
     put_u24(tail, size);
     return create_file(card, DF_CREATE_STD_DATA_FILE, file_no, iso_fid, iso_fid != 0,
@@ -690,6 +709,9 @@ int nxpsc_create_std_file(nxpsc_card_t *card, uint8_t file_no, uint16_t iso_fid,
 
 int nxpsc_create_backup_file(nxpsc_card_t *card, uint8_t file_no, uint16_t iso_fid,
                              nxpsc_commmode_t comm, const nxpsc_access_t *access, uint32_t size) {
+    if (fits_u24(size) == false) {
+        return NXPSC_E_LENGTH;
+    }
     uint8_t tail[3];
     put_u24(tail, size);
     return create_file(card, DF_CREATE_BACKUP_DATA_FILE, file_no, iso_fid, iso_fid != 0,
@@ -711,6 +733,9 @@ int nxpsc_create_value_file(nxpsc_card_t *card, uint8_t file_no, nxpsc_commmode_
 int nxpsc_create_record_file(nxpsc_card_t *card, bool cyclic, uint8_t file_no, uint16_t iso_fid,
                              nxpsc_commmode_t comm, const nxpsc_access_t *access,
                              uint32_t record_size, uint32_t max_records) {
+    if (fits_u24(record_size) == false || fits_u24(max_records) == false) {
+        return NXPSC_E_LENGTH;
+    }
     uint8_t tail[6];
     put_u24(tail, record_size);
     put_u24(tail + 3, max_records);
@@ -737,6 +762,9 @@ int nxpsc_read_data(nxpsc_card_t *card, uint8_t file_no, uint32_t offset, uint32
     if (card == NULL || out == NULL || out_len == NULL) {
         return NXPSC_E_PARAM;
     }
+    if (fits_u24(offset) == false || fits_u24(length) == false) {
+        return NXPSC_E_LENGTH;
+    }
 
     uint8_t data[7];
     data[0] = file_no;
@@ -752,6 +780,9 @@ int nxpsc_write_data(nxpsc_card_t *card, uint8_t file_no, uint32_t offset,
                      const uint8_t *data, size_t len, nxpsc_commmode_t comm) {
     if (card == NULL || (len > 0 && data == NULL)) {
         return NXPSC_E_PARAM;
+    }
+    if (fits_u24(offset) == false || fits_u24((uint32_t)len) == false) {
+        return NXPSC_E_LENGTH;
     }
     if (len > NXPSC_MAX_RESPONSE - 16) {
         return NXPSC_E_LENGTH;
@@ -842,6 +873,9 @@ int nxpsc_write_record(nxpsc_card_t *card, uint8_t file_no, uint32_t offset,
     if (card == NULL || (len > 0 && data == NULL)) {
         return NXPSC_E_PARAM;
     }
+    if (fits_u24(offset) == false || fits_u24((uint32_t)len) == false) {
+        return NXPSC_E_LENGTH;
+    }
     if (len > NXPSC_MAX_RESPONSE - 16) {
         return NXPSC_E_LENGTH;
     }
@@ -872,6 +906,9 @@ int nxpsc_update_record(nxpsc_card_t *card, uint8_t file_no, uint32_t record_no,
                         nxpsc_commmode_t comm) {
     if (card == NULL || (len > 0 && data == NULL)) {
         return NXPSC_E_PARAM;
+    }
+    if (fits_u24(record_no) == false || fits_u24(offset) == false || fits_u24((uint32_t)len) == false) {
+        return NXPSC_E_LENGTH;
     }
     if (len > NXPSC_MAX_RESPONSE - 16) {
         return NXPSC_E_LENGTH;
@@ -905,6 +942,9 @@ int nxpsc_read_records(nxpsc_card_t *card, uint8_t file_no, uint32_t record_no,
                        uint8_t *out, size_t cap, size_t *out_len) {
     if (card == NULL || out == NULL || out_len == NULL) {
         return NXPSC_E_PARAM;
+    }
+    if (fits_u24(record_no) == false || fits_u24(record_count) == false) {
+        return NXPSC_E_LENGTH;
     }
 
     uint8_t data[7];

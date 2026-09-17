@@ -40,6 +40,10 @@ static void put_u24le(uint8_t *out, uint32_t value) {
     out[2] = (uint8_t)((value >> 16) & 0xFF);
 }
 
+static bool fits_u24(uint32_t value) {
+    return (value & 0xFF000000U) == 0;
+}
+
 // AES CMAC truncated to its odd bytes, the form DESFire uses for 8 byte MACs
 static int cmac8(const uint8_t *key, const uint8_t *data, size_t len, uint8_t *mac8) {
     uint8_t full[16] = {0};
@@ -116,6 +120,9 @@ int nxpsc_create_delegated_application(nxpsc_card_t *card, uint32_t aid, uint16_
 
     if (card == NULL || enck == NULL || dam_mac == NULL) {
         return NXPSC_E_PARAM;
+    }
+    if (fits_u24(aid) == false) {
+        return NXPSC_E_LENGTH;
     }
     if (df_name_len > 16 || (df_name_len > 0 && df_name == NULL)) {
         return NXPSC_E_PARAM;
@@ -407,18 +414,44 @@ int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t
         return NXPSC_E_CARD;
     }
 
-    if (verify_len >= PC_MAC_LEN && mac_ok != NULL) {
-        // same input with the response status in place of the command byte
-        mac_input[0] = DF_S_SIGNATURE;
-
-        uint8_t expected[PC_MAC_LEN] = {0};
-        rc = cmac8(pc_key->data, mac_input, mac_input_len, expected);
-        if (rc != NXPSC_OK) {
-            return rc;
-        }
-        *mac_ok = (memcmp(verify, expected, PC_MAC_LEN) == 0);
+    if (verify_len < PC_MAC_LEN) {
+        nxpsc_secure_zero(challenge, sizeof(challenge));
+        nxpsc_secure_zero(exchanged, sizeof(exchanged));
+        nxpsc_secure_zero(mac_input, sizeof(mac_input));
+        nxpsc_secure_zero(mac, sizeof(mac));
+        nxpsc_secure_zero(verify, sizeof(verify));
+        return NXPSC_E_LENGTH;
     }
 
+    // same input with the response status in place of the command byte
+    mac_input[0] = DF_S_SIGNATURE;
+
+    uint8_t expected[PC_MAC_LEN] = {0};
+    rc = cmac8(pc_key->data, mac_input, mac_input_len, expected);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    bool ok = nxpsc_memeq(verify, expected, PC_MAC_LEN);
+    if (mac_ok != NULL) {
+        *mac_ok = ok;
+    }
+    if (ok == false) {
+        nxpsc_secure_zero(challenge, sizeof(challenge));
+        nxpsc_secure_zero(exchanged, sizeof(exchanged));
+        nxpsc_secure_zero(mac_input, sizeof(mac_input));
+        nxpsc_secure_zero(mac, sizeof(mac));
+        nxpsc_secure_zero(verify, sizeof(verify));
+        nxpsc_secure_zero(expected, sizeof(expected));
+        return NXPSC_E_AUTH;
+    }
+
+    nxpsc_secure_zero(challenge, sizeof(challenge));
+    nxpsc_secure_zero(exchanged, sizeof(exchanged));
+    nxpsc_secure_zero(mac_input, sizeof(mac_input));
+    nxpsc_secure_zero(mac, sizeof(mac));
+    nxpsc_secure_zero(verify, sizeof(verify));
+    nxpsc_secure_zero(expected, sizeof(expected));
     return NXPSC_OK;
 }
 

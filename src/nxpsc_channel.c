@@ -595,8 +595,11 @@ static int decode_d40(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
 
     if (card->mode == MODE_MAC) {
         size_t mac_len = nxpsc_mac_length(card);
-        if (src_len <= mac_len || receives_mac(card, card->last_cmd) == false) {
+        if (receives_mac(card, card->last_cmd) == false) {
             return NXPSC_OK;
+        }
+        if (src_len <= mac_len) {
+            return NXPSC_E_LENGTH;
         }
 
         size_t plen = nxpsc_padded_len(src_len - mac_len, bs);
@@ -613,7 +616,7 @@ static int decode_d40(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
             return rc;
         }
 
-        if (memcmp(iv, src + src_len - mac_len, mac_len) != 0) {
+        if (nxpsc_memeq(iv, src + src_len - mac_len, mac_len) == false) {
             card->mac_mismatch = true;
             return NXPSC_E_CRYPTO;
         }
@@ -657,9 +660,7 @@ static int decode_ev1(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
             (card->mode == MODE_ENC && card->last_request_zero_len == false)) {
 
         if (src_len < mac_len) {
-            memcpy(dst, src, src_len);
-            *dst_len = src_len;
-            return NXPSC_OK;
+            return NXPSC_E_LENGTH;
         }
 
         size_t data_len = src_len - mac_len;
@@ -680,7 +681,7 @@ static int decode_ev1(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
             return rc;
         }
 
-        if (memcmp(src + data_len, cmac, mac_len) != 0) {
+        if (nxpsc_memeq(src + data_len, cmac, mac_len) == false) {
             card->mac_mismatch = true;
             return NXPSC_E_CRYPTO;
         }
@@ -735,7 +736,7 @@ static int decode_ev2(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
     }
 
     if (src_len < mac_len) {
-        return NXPSC_OK;
+        return NXPSC_E_LENGTH;
     }
 
     size_t data_len = src_len - mac_len;
@@ -745,7 +746,7 @@ static int decode_ev2(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
         return rc;
     }
 
-    if (memcmp(src + data_len, mac, mac_len) != 0) {
+    if (nxpsc_memeq(src + data_len, mac, mac_len) == false) {
         card->mac_mismatch = true;
         return NXPSC_E_CRYPTO;
     }
@@ -943,7 +944,12 @@ static int auth_legacy(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *ke
     nxpsc_session_key_d40(rnd_a, rnd_b, key->type, session);
 
     rol(rnd_a, rnd_len);
-    if (memcmp(rnd_a, enc_rnd_a, rnd_len) != 0) {
+    if (nxpsc_memeq(rnd_a, enc_rnd_a, rnd_len) == false) {
+        nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+        nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+        nxpsc_secure_zero(rot_b, sizeof(rot_b));
+        nxpsc_secure_zero(enc_rnd_a, sizeof(enc_rnd_a));
+        nxpsc_secure_zero(session, sizeof(session));
         return NXPSC_E_AUTH;
     }
 
@@ -955,6 +961,11 @@ static int auth_legacy(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *ke
     memcpy(card->session_mac, session, nxpsc_key_size(key->type));
     memset(card->iv, 0, sizeof(card->iv));
     card->authenticated = true;
+    nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+    nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+    nxpsc_secure_zero(rot_b, sizeof(rot_b));
+    nxpsc_secure_zero(enc_rnd_a, sizeof(enc_rnd_a));
+    nxpsc_secure_zero(session, sizeof(session));
     return NXPSC_OK;
 }
 
@@ -1020,8 +1031,13 @@ static int auth_ev2(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
     if (rc != NXPSC_OK) {
         return rc;
     }
-    if (status != DF_S_OK || resp_len < NXPSC_AES_BLOCK) {
+    if (status != DF_S_OK) {
         return NXPSC_E_AUTH;
+    }
+
+    size_t need = first ? (NXPSC_AES_BLOCK * 2) : NXPSC_AES_BLOCK;
+    if (resp_len != need) {
+        return NXPSC_E_LENGTH;
     }
 
     uint8_t data[64] = {0};
@@ -1031,12 +1047,21 @@ static int auth_ev2(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
         return rc;
     }
 
-    uint8_t rot_a[NXPSC_AES_BLOCK] = {0};
-    memcpy(rot_a, rnd_a, sizeof(rot_a));
-    rol(rot_a, sizeof(rot_a));
+    uint8_t ret_rnd_a[NXPSC_AES_BLOCK] = {0};
+    if (first) {
+        ret_rnd_a[0] = data[19];
+        memcpy(ret_rnd_a + 1, data + 4, NXPSC_AES_BLOCK - 1);
+    } else {
+        ret_rnd_a[0] = data[15];
+        memcpy(ret_rnd_a + 1, data, NXPSC_AES_BLOCK - 1);
+    }
 
-    const uint8_t *received = first ? data + 4 : data;
-    if (memcmp(rot_a, received, NXPSC_AES_BLOCK) != 0) {
+    if (nxpsc_memeq(rnd_a, ret_rnd_a, NXPSC_AES_BLOCK) == false) {
+        nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+        nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+        nxpsc_secure_zero(rot_b, sizeof(rot_b));
+        nxpsc_secure_zero(data, sizeof(data));
+        nxpsc_secure_zero(ret_rnd_a, sizeof(ret_rnd_a));
         return NXPSC_E_AUTH;
     }
 
@@ -1054,6 +1079,11 @@ static int auth_ev2(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
     card->key_no = key_no;
     memcpy(card->key, key->data, nxpsc_key_size(key->type));
     card->authenticated = true;
+    nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+    nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+    nxpsc_secure_zero(rot_b, sizeof(rot_b));
+    nxpsc_secure_zero(data, sizeof(data));
+    nxpsc_secure_zero(ret_rnd_a, sizeof(ret_rnd_a));
     return NXPSC_OK;
 }
 
@@ -1124,7 +1154,13 @@ static int auth_lrp(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
     if (resp_len < (size_t)(first ? NXPSC_AES_BLOCK * 2 : NXPSC_AES_BLOCK)) {
         return NXPSC_E_LENGTH;
     }
-    if (memcmp(received, cmac, NXPSC_AES_BLOCK) != 0) {
+    if (nxpsc_memeq(received, cmac, NXPSC_AES_BLOCK) == false) {
+        nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+        nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+        nxpsc_secure_zero(session, sizeof(session));
+        nxpsc_secure_zero(tmp, sizeof(tmp));
+        nxpsc_secure_zero(cmac, sizeof(cmac));
+        nxpsc_secure_zero(&lrp, sizeof(lrp));
         return NXPSC_E_AUTH;
     }
 
@@ -1148,6 +1184,12 @@ static int auth_lrp(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
     card->key_no = key_no;
     memcpy(card->key, key->data, nxpsc_key_size(key->type));
     card->authenticated = true;
+    nxpsc_secure_zero(rnd_a, sizeof(rnd_a));
+    nxpsc_secure_zero(rnd_b, sizeof(rnd_b));
+    nxpsc_secure_zero(session, sizeof(session));
+    nxpsc_secure_zero(tmp, sizeof(tmp));
+    nxpsc_secure_zero(cmac, sizeof(cmac));
+    nxpsc_secure_zero(&lrp, sizeof(lrp));
     return NXPSC_OK;
 }
 

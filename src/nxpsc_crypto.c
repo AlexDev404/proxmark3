@@ -27,6 +27,7 @@
 
 #include <mbedtls/aes.h>
 #include <mbedtls/des.h>
+#include <mbedtls/platform_util.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -68,6 +69,25 @@ size_t nxpsc_block_size(nxpsc_keytype_t type) {
 
 bool nxpsc_key_is_valid(const nxpsc_key_t *key) {
     return (key != NULL && nxpsc_key_size(key->type) != 0);
+}
+
+bool nxpsc_memeq(const uint8_t *a, const uint8_t *b, size_t len) {
+    if ((len > 0) && (a == NULL || b == NULL)) {
+        return false;
+    }
+
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+void nxpsc_secure_zero(void *buf, size_t len) {
+    if (len == 0 || buf == NULL) {
+        return;
+    }
+    mbedtls_platform_zeroize(buf, len);
 }
 
 void nxpsc_xor(uint8_t *dst, const uint8_t *src, size_t len) {
@@ -134,10 +154,15 @@ static int des_setkey(mbedtls_des3_context *ctx3, mbedtls_des_context *ctx1,
         case NXPSC_KEY_2K3DES:
             memcpy(k24, key, 16);
             memcpy(k24 + 16, key, 8);
-            return encrypt ? mbedtls_des3_set3key_enc(ctx3, k24) : mbedtls_des3_set3key_dec(ctx3, k24);
+            {
+                int rc = encrypt ? mbedtls_des3_set3key_enc(ctx3, k24) : mbedtls_des3_set3key_dec(ctx3, k24);
+                nxpsc_secure_zero(k24, sizeof(k24));
+                return rc;
+            }
         case NXPSC_KEY_3K3DES:
             return encrypt ? mbedtls_des3_set3key_enc(ctx3, key) : mbedtls_des3_set3key_dec(ctx3, key);
         default:
+            nxpsc_secure_zero(k24, sizeof(k24));
             return -1;
     }
 }
@@ -359,7 +384,7 @@ int nxpsc_cmac(nxpsc_keytype_t type, const uint8_t *key, uint8_t *iv,
         memcpy(mac, useiv, bs);
     }
 
-    memset(buffer, 0, buflen);
+    nxpsc_secure_zero(buffer, buflen);
     free(buffer);
     return rc;
 }
@@ -590,6 +615,7 @@ int nxpsc_session_key_lrp(const uint8_t *key, const uint8_t *rnda, const uint8_t
     nxpsc_lrp_ctx_t ctx;
     nxpsc_lrp_init(&ctx, key, 0, true);
     nxpsc_lrp_cmac(&ctx, data, sizeof(data), out);
+    nxpsc_secure_zero(&ctx, sizeof(ctx));
     return NXPSC_OK;
 }
 
@@ -631,6 +657,7 @@ int nxpsc_trans_session_key_lrp(const uint8_t *key, uint32_t counter, const uint
     nxpsc_lrp_ctx_t ctx;
     nxpsc_lrp_init(&ctx, key, 0, false);
     nxpsc_lrp_cmac(&ctx, sv, sizeof(sv), out);
+    nxpsc_secure_zero(&ctx, sizeof(ctx));
     return NXPSC_OK;
 }
 
@@ -666,7 +693,7 @@ static void lrp_generate_tables(nxpsc_lrp_ctx_t *ctx) {
 
 void nxpsc_lrp_init(nxpsc_lrp_ctx_t *ctx, const uint8_t *key, size_t updated_key,
                     bool bit_padding) {
-    memset(ctx, 0, sizeof(*ctx));
+    nxpsc_secure_zero(ctx, sizeof(*ctx));
     memcpy(ctx->key, key, NXPSC_AES_BLOCK);
 
     lrp_generate_tables(ctx);
@@ -767,7 +794,7 @@ int nxpsc_lrp_encode(nxpsc_lrp_ctx_t *ctx, const uint8_t *data, size_t len,
     }
     *out_len = dlen;
 
-    memset(buf, 0, dlen);
+    nxpsc_secure_zero(buf, dlen);
     free(buf);
     return NXPSC_OK;
 }
