@@ -1,2 +1,0 @@
-DOCKER_IMAGE=pm3-ubuntu-25.10:1.0
-#SKIPQT=1

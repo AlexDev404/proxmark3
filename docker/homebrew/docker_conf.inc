@@ -1,1 +1,0 @@
-DOCKER_IMAGE=pm3-brew:1.0

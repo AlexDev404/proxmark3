@@ -1,2 +1,0 @@
-DOCKER_IMAGE=pm3-arch:1.0
-#SKIPQT=1
