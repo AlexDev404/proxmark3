@@ -308,9 +308,9 @@ int nxpsc_create_record_file(nxpsc_card_t *card, bool cyclic, uint8_t file_no, u
                              uint32_t record_size, uint32_t max_records);
 int nxpsc_delete_file(nxpsc_card_t *card, uint8_t file_no);
 
-// comm == NXPSC_COMM_PLAIN and an unauthenticated session is allowed when the
-// file access rights say so. pass NXPSC_COMM_AUTO_FROM_SETTINGS by reading the
-// settings first with nxpsc_get_file_settings()
+// comm == NXPSC_COMM_PLAIN with no session is allowed when the file access
+// rights say so. read the file settings first with nxpsc_get_file_settings()
+// to learn which mode a file expects
 int nxpsc_read_data(nxpsc_card_t *card, uint8_t file_no, uint32_t offset, uint32_t length,
                     nxpsc_commmode_t comm, uint8_t *out, size_t cap, size_t *out_len);
 int nxpsc_write_data(nxpsc_card_t *card, uint8_t file_no, uint32_t offset,

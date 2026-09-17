@@ -825,12 +825,23 @@ static nxpsc_channel_t pick_channel(const nxpsc_card_t *card, const nxpsc_key_t 
         case DESFIRE_EV2:
         case DESFIRE_EV2_XL:
         case DESFIRE_EV3:
+            // these still hold (2K3)DES keys, e.g. the factory PICC master key
+            if (key->type == NXPSC_KEY_DES || key->type == NXPSC_KEY_2K3DES) {
+                return NXPSC_CHAN_D40;
+            }
+            if (key->type == NXPSC_KEY_3K3DES) {
+                return NXPSC_CHAN_EV1;
+            }
+            return NXPSC_CHAN_EV2;
         case DESFIRE_LIGHT:
         case NTAG424:
         case DUOX:
             return NXPSC_CHAN_EV2;
         case DESFIRE_EV1:
         case NTAG413DNA:
+            if (key->type == NXPSC_KEY_DES || key->type == NXPSC_KEY_2K3DES) {
+                return NXPSC_CHAN_D40;
+            }
             return NXPSC_CHAN_EV1;
         default:
             break;
