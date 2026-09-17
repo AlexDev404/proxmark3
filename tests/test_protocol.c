@@ -226,6 +226,33 @@ static void test_iso_wrapping(void) {
     nxpsc_close(card);
 }
 
+static void test_iso_wrapping_zero_data(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+    nxpsc_version_t version;
+
+    mock_init(&mock, DESFIRE_EV1);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    nxpsc_set_cmdset(card, NXPSC_CMDSET_NATIVE_ISO);
+
+    ok = ok && (nxpsc_get_version(card, &version) == NXPSC_OK);
+    ok = ok && (mock.tx_count == 3);
+    ok = ok && (mock.tx_len[0] == 5);
+    ok = ok && (mock.tx[0][0] == 0x90) && (mock.tx[0][1] == 0x60);
+    ok = ok && (mock.tx[0][2] == 0x00) && (mock.tx[0][3] == 0x00) && (mock.tx[0][4] == 0x00);
+    ok = ok && (mock.tx_len[1] == 5) && (mock.tx_len[2] == 5);
+    ok = ok && (mock.tx[1][0] == 0x90) && (mock.tx[1][1] == 0xAF);
+    ok = ok && (mock.tx[2][0] == 0x90) && (mock.tx[2][1] == 0xAF);
+    ok = ok && (mock.tx[1][2] == 0x00) && (mock.tx[1][3] == 0x00) && (mock.tx[1][4] == 0x00);
+    ok = ok && (mock.tx[2][2] == 0x00) && (mock.tx[2][3] == 0x00) && (mock.tx[2][4] == 0x00);
+
+    check("ISO wrapped zero-data framing", ok);
+    nxpsc_close(card);
+}
+
 static void test_file_settings(void) {
     mock_card_t mock;
     nxpsc_transport_t transport;
@@ -752,6 +779,7 @@ int main(void) {
     test_version_fields();
     test_native_framing();
     test_iso_wrapping();
+    test_iso_wrapping_zero_data();
     test_file_settings();
     test_create_file_framing();
     test_value_and_data();

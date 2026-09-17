@@ -301,8 +301,8 @@ static int frame_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, 
         tx[tx_len++] = cmd;
         tx[tx_len++] = 0x00;
         tx[tx_len++] = 0x00;
-        tx[tx_len++] = (uint8_t)len;
         if (len > 0) {
+            tx[tx_len++] = (uint8_t)len;
             memcpy(tx + tx_len, data, len);
             tx_len += len;
         }
