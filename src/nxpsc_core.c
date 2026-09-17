@@ -633,7 +633,7 @@ int nxpsc_get_version(nxpsc_card_t *card, nxpsc_version_t *version) {
 
     card->version = v;
     card->version_read = true;
-    card->type = nxpsc_card_type_from_version(v.hw_type, v.sw_major, v.sw_minor);
+    card->type = nxpsc_card_type_from_version(v.hw_type, v.hw_major, v.hw_minor);
 
     if (card->uid_len == 0) {
         memcpy(card->uid, v.uid, 7);

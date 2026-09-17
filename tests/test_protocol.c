@@ -173,6 +173,9 @@ static void test_version_fields(void) {
     ok = ok && (version.hw_vendor == 0x04);
     ok = ok && (version.hw_type == 0x01);
     ok = ok && (version.hw_major == 0x33);
+    ok = ok && (version.sw_type == 0x01);
+    ok = ok && (version.sw_major == 0x03);
+    ok = ok && (version.sw_minor == 0x00);
     ok = ok && (version.uid[0] == 0x04);
     ok = ok && (version.year == 0x18);
 
