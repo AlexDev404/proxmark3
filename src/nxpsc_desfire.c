@@ -440,6 +440,12 @@ static int change_key(nxpsc_card_t *card, bool ev2, uint8_t key_set, uint8_t key
     }
 
     bool same_key = (key_no == card->key_no) && (ev2 == false);
+    // a key in a key set other than the active one carries no version byte of
+    // its own, the whole set gets its version from FinalizeKeySet. sending one
+    // makes the deciphered payload 21 bytes where the card wants 20, and it
+    // answers 0x7E. verified against EV3, which accepts key || CRC32(key) for
+    // a non active set and key || version || CRC32(key) for the active one
+    bool inactive_key_set = (ev2 && key_set != 0);
     if (same_key == false && nxpsc_key_is_valid(old_key) == false) {
         return NXPSC_E_PARAM;
     }
@@ -485,7 +491,8 @@ static int change_key(nxpsc_card_t *card, bool ev2, uint8_t key_set, uint8_t key
         nxpsc_xor(payload, old_buf, new_len);
     }
 
-    if (new_key->type == NXPSC_KEY_AES128 || new_key->type == NXPSC_KEY_AES256) {
+    if ((new_key->type == NXPSC_KEY_AES128 || new_key->type == NXPSC_KEY_AES256) &&
+            inactive_key_set == false) {
         payload[payload_len++] = new_key->version;
     }
 

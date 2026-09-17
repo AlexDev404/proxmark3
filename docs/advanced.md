@@ -100,8 +100,22 @@ An application can hold several complete sets of keys and switch between them
 atomically, which is how a key rotation happens without a window where half the
 estate is broken.
 
+The application has to be built for them. A plain `nxpsc_create_application()`
+cannot hold key sets and every command below will be refused on it, so reach for
+`nxpsc_create_application_ex()` and give it `num_key_sets`:
+
 ```c
-nxpsc_init_key_set(card, key_set, num_keys, key_type);   // create the set
+nxpsc_app_config_t cfg = {0};
+cfg.key_settings = 0x0F;
+cfg.num_keys = 3;
+cfg.key_type = NXPSC_KEY_AES128;
+cfg.num_key_sets = 4;        // sets 0..3, set 0 is the active one
+cfg.max_key_size = 16;
+nxpsc_create_application_ex(card, aid, &cfg);
+```
+
+```c
+nxpsc_init_key_set(card, key_set, key_set_settings);     // create the set
 nxpsc_change_key_ev2(card, key_set, key_no, old, new);   // fill it
 nxpsc_finalize_key_set(card, key_set, key_set_version);  // freeze it
 nxpsc_roll_key_set(card, key_set);                       // make it the active one
@@ -109,6 +123,18 @@ nxpsc_roll_key_set(card, key_set);                       // make it the active o
 
 Roll is the switch. Until it is called the new set is inert, so a batch of cards
 can be prepared over weeks and cut over in one pass.
+
+Two things differ from the active set, both confirmed against EV3 rather than
+taken from a reference implementation, since none of proxmark3, libfreefare or
+RevK's DESFireAES implements key sets:
+
+- `key_set_settings` is a settings byte, not a key count. The number of keys and
+  their type come from the application. An EV3 whose `AppKeySetSett` is `0x00`
+  accepts only `0x00` here, answering `0x9D` to `0x01` and `0x9E` to `0x80`
+- a key in a non active set carries no version byte of its own, the set takes
+  its version from `nxpsc_finalize_key_set()`. `nxpsc_change_key_ev2()` handles
+  that, sending `key || CRC32(key)` for a non active set against
+  `key || version || CRC32(key)` for the active one
 
 ## Proximity check
 ^[Top](#top)

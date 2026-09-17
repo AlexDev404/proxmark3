@@ -658,8 +658,11 @@ static void test_advanced_commands(void) {
 
     // key set management
     mock.tx_count = 0;
-    nxpsc_init_key_set(card, 0x01, 3, NXPSC_KEY_AES128);
-    ok = ok && (mock.tx[0][0] == 0x56) && (mock.tx[0][1] == 0x01) && (mock.tx[0][2] == 0x83);
+    nxpsc_init_key_set(card, 0x01, 0x00);
+    // two bytes, key set then its settings. EV3 answers 0x7E to any other
+    // length and only accepts 0x00 for the second byte
+    ok = ok && (mock.tx_len[0] == 3);
+    ok = ok && (mock.tx[0][0] == 0x56) && (mock.tx[0][1] == 0x01) && (mock.tx[0][2] == 0x00);
     mock.tx_count = 0;
     nxpsc_finalize_key_set(card, 0x01, 0x10);
     ok = ok && (mock.tx[0][0] == 0x57);
@@ -688,7 +691,7 @@ static void test_advanced_commands(void) {
 
     nxpsc_key_t des = {.type = NXPSC_KEY_DES};
     ok = ok && (nxpsc_proximity_check(card, &des, 1, NULL) == NXPSC_E_UNSUPPORTED);
-    ok = ok && (nxpsc_init_key_set(card, 0, 1, NXPSC_KEY_AES256) == NXPSC_E_UNSUPPORTED);
+    ok = ok && (nxpsc_init_key_set(NULL, 0, 0x00) == NXPSC_E_PARAM);
 
     check("EV2 extras and ISO chaining", ok);
     nxpsc_close(card);

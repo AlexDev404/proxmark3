@@ -250,28 +250,15 @@ int nxpsc_notify_transaction_success(nxpsc_card_t *card) {
 //-----------------------------------------------------------------------------
 // key set management, EV2 and later
 //-----------------------------------------------------------------------------
-int nxpsc_init_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t num_keys,
-                       nxpsc_keytype_t key_type) {
+int nxpsc_init_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t key_set_settings) {
     if (card == NULL) {
         return NXPSC_E_PARAM;
     }
 
-    uint8_t key_byte = (uint8_t)(num_keys & 0x0F);
-    switch (key_type) {
-        case NXPSC_KEY_3K3DES:
-            key_byte |= 0x40;
-            break;
-        case NXPSC_KEY_AES128:
-            key_byte |= 0x80;
-            break;
-        case NXPSC_KEY_DES:
-        case NXPSC_KEY_2K3DES:
-            break;
-        default:
-            return NXPSC_E_UNSUPPORTED;
-    }
-
-    uint8_t data[2] = { key_set, key_byte };
+    // InitializeKeySet takes exactly two bytes, verified against EV3: one and
+    // three byte payloads answer 0x7E. the second is a settings byte for the
+    // new set, the key count and type are fixed by the application
+    uint8_t data[2] = { key_set, key_set_settings };
     uint8_t resp[16] = {0};
     size_t resp_len = 0;
     return nxpsc_exchange(card, DF_INIT_KEY_SETTINGS, data, sizeof(data), MODE_MAC, MODE_MAC,
