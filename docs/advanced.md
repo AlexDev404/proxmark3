@@ -124,17 +124,23 @@ nxpsc_roll_key_set(card, key_set);                       // make it the active o
 Roll is the switch. Until it is called the new set is inert, so a batch of cards
 can be prepared over weeks and cut over in one pass.
 
-Two things differ from the active set, both confirmed against EV3 rather than
-taken from a reference implementation, since none of proxmark3, libfreefare or
-RevK's DESFireAES implements key sets:
+Three things are easy to get wrong here, all confirmed against EV3:
 
-- `key_set_settings` is a settings byte, not a key count. The number of keys and
-  their type come from the application. An EV3 whose `AppKeySetSett` is `0x00`
-  accepts only `0x00` here, answering `0x9D` to `0x01` and `0x9E` to `0x80`
-- a key in a non active set carries no version byte of its own, the set takes
-  its version from `nxpsc_finalize_key_set()`. `nxpsc_change_key_ev2()` handles
-  that, sending `key || CRC32(key)` for a non active set against
-  `key || version || CRC32(key)` for the active one
+- the second argument to `nxpsc_init_key_set()` is the new set's **key type**,
+  not a key count or a settings byte. It has to match the application. A set
+  built as 2TDEA inside an AES application is accepted, then takes 2TDEA shaped
+  `nxpsc_change_key_ev2()` payloads and can never be rolled, which is a
+  confusing way to lose an afternoon
+- `num_key_sets` must be 2 to 16 and `max_key_size` must be 16 or 24. Anything
+  else is refused at `CreateApplication` time with `0x9E`
+- `key_set_settings` is an access right naming the key allowed to roll:
+  `0x00`..`0x0D` a key number, `0x0E` free. Issue `nxpsc_roll_key_set()` under
+  any other key and the card answers `0xAE`
+
+The roll swaps out the key the running session was built from, so the card
+answers it without a MAC and the session is gone afterwards.
+`nxpsc_roll_key_set()` accounts for both and leaves the channel reset, so
+authenticate again before carrying on.
 
 ## Proximity check
 ^[Top](#top)

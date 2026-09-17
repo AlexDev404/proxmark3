@@ -250,15 +250,32 @@ int nxpsc_notify_transaction_success(nxpsc_card_t *card) {
 //-----------------------------------------------------------------------------
 // key set management, EV2 and later
 //-----------------------------------------------------------------------------
-int nxpsc_init_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t key_set_settings) {
+int nxpsc_init_key_set(nxpsc_card_t *card, uint8_t key_set, nxpsc_keytype_t key_type) {
     if (card == NULL) {
         return NXPSC_E_PARAM;
     }
 
     // InitializeKeySet takes exactly two bytes, verified against EV3: one and
-    // three byte payloads answer 0x7E. the second is a settings byte for the
-    // new set, the key count and type are fixed by the application
-    uint8_t data[2] = { key_set, key_set_settings };
+    // three byte payloads answer 0x7E. the second is the key type of the new
+    // set, carried unshifted rather than in the top two bits the way a key
+    // number carries it
+    uint8_t type_code;
+    switch (key_type) {
+        case NXPSC_KEY_DES:
+        case NXPSC_KEY_2K3DES:
+            type_code = 0x00;
+            break;
+        case NXPSC_KEY_3K3DES:
+            type_code = 0x01;
+            break;
+        case NXPSC_KEY_AES128:
+            type_code = 0x02;
+            break;
+        default:
+            return NXPSC_E_UNSUPPORTED;
+    }
+
+    uint8_t data[2] = { key_set, type_code };
     uint8_t resp[16] = {0};
     size_t resp_len = 0;
     return nxpsc_exchange(card, DF_INIT_KEY_SETTINGS, data, sizeof(data), MODE_MAC, MODE_MAC,
@@ -284,8 +301,14 @@ int nxpsc_roll_key_set(nxpsc_card_t *card, uint8_t key_set) {
 
     uint8_t resp[16] = {0};
     size_t resp_len = 0;
-    return nxpsc_exchange(card, DF_ROLL_KEY_SETTINGS, &key_set, 1, MODE_MAC, MODE_MAC,
-                          resp, sizeof(resp), &resp_len);
+    // rolling swaps the whole key set, including the key the running session
+    // was built from, so the card answers without a MAC and the session is
+    // gone once it has. asking for a MACed answer here reports a length error
+    // over a command the card actually carried out
+    int rc = nxpsc_exchange(card, DF_ROLL_KEY_SETTINGS, &key_set, 1, MODE_MAC, MODE_PLAIN,
+                            resp, sizeof(resp), &resp_len);
+    nxpsc_reset_channel(card);
+    return rc;
 }
 
 //-----------------------------------------------------------------------------
