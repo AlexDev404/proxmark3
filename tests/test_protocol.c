@@ -48,6 +48,65 @@ static int fixed_rng(void *ctx, uint8_t *out, size_t len) {
     return NXPSC_OK;
 }
 
+static void setup_mock_auth(mock_card_t *mock, mock_auth_scheme_t scheme,
+                            const nxpsc_key_t *key, const uint8_t *rnd_b) {
+    size_t key_len = nxpsc_key_size(key->type);
+    size_t rnd_len = nxpsc_block_size(key->type);
+
+    mock->auth_scheme = scheme;
+    mock->auth_key_type = key->type;
+    memcpy(mock->auth_key, key->data, key_len);
+    memset(mock->auth_rnd_b, 0, sizeof(mock->auth_rnd_b));
+    memcpy(mock->auth_rnd_b, rnd_b, rnd_len);
+}
+
+static bool auth_frame_has_payload(const mock_card_t *mock, size_t index) {
+    if (index >= mock->tx_count) {
+        return false;
+    }
+    return mock->tx_len[index] > 5 &&
+           mock->tx[index][0] == 0x90 &&
+           mock->tx[index][1] == 0xAF &&
+           mock->tx[index][4] > 0;
+}
+
+static bool run_desfire_auth_case(nxpsc_cardtype_t type, nxpsc_channel_t channel,
+                                  mock_auth_scheme_t scheme, const nxpsc_key_t *key,
+                                  const uint8_t *rnd_b, uint8_t first_cmd,
+                                  bool include_nonfirst) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, type);
+    setup_mock_auth(&mock, scheme, key, rnd_b);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok) {
+        nxpsc_set_cmdset(card, NXPSC_CMDSET_NATIVE_ISO);
+    }
+
+    ok = ok && (nxpsc_authenticate(card, 0x00, key, channel) == NXPSC_OK);
+    ok = ok && nxpsc_is_authenticated(card);
+    ok = ok && (mock.tx_count == 2);
+    ok = ok && (mock.tx[0][0] == 0x90) && (mock.tx[0][1] == first_cmd);
+    ok = ok && auth_frame_has_payload(&mock, 1);
+
+    if (ok && include_nonfirst) {
+        mock.tx_count = 0;
+        setup_mock_auth(&mock, scheme, key, rnd_b);
+        ok = ok && (nxpsc_authenticate_nonfirst(card, 0x01, key) == NXPSC_OK);
+        ok = ok && nxpsc_is_authenticated(card);
+        ok = ok && (mock.tx_count == 2);
+        ok = ok && (mock.tx[0][0] == 0x90) && (mock.tx[0][1] == 0x77);
+        ok = ok && auth_frame_has_payload(&mock, 1);
+    }
+
+    nxpsc_close(card);
+    return ok;
+}
+
 static int plus_auth_transceive(void *ctx, const uint8_t *tx, size_t tx_len,
                                 uint8_t *rx, size_t cap, size_t *rx_len) {
     plus_auth_ctx_t *auth = (plus_auth_ctx_t *)ctx;
@@ -254,6 +313,41 @@ static void test_iso_wrapping_zero_data(void) {
 
     check("ISO wrapped zero-data framing", ok);
     nxpsc_close(card);
+}
+
+static void test_desfire_authentication(void) {
+    const nxpsc_key_t key_d40 = {
+        .type = NXPSC_KEY_2K3DES,
+        .data = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
+    };
+    const nxpsc_key_t key_ev1 = {
+        .type = NXPSC_KEY_2K3DES,
+        .data = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
+    };
+    const nxpsc_key_t key_aes = {
+        .type = NXPSC_KEY_AES128,
+        .data = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F},
+    };
+    const uint8_t rnd_b8[8] = {0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87};
+    const uint8_t rnd_b16[16] = {0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+                                 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F};
+
+    nxpsc_set_rng(fixed_rng, NULL);
+
+    bool ok = run_desfire_auth_case(DESFIRE_MF3ICD40, NXPSC_CHAN_D40, MOCK_AUTH_LEGACY,
+                                    &key_d40, rnd_b8, 0x0A, false);
+    ok = ok && run_desfire_auth_case(DESFIRE_EV1, NXPSC_CHAN_EV1, MOCK_AUTH_LEGACY,
+                                     &key_ev1, rnd_b8, 0x1A, false);
+    ok = ok && run_desfire_auth_case(DESFIRE_EV2, NXPSC_CHAN_EV2, MOCK_AUTH_EV2,
+                                     &key_aes, rnd_b16, 0x71, true);
+    ok = ok && run_desfire_auth_case(DESFIRE_LIGHT, NXPSC_CHAN_LRP, MOCK_AUTH_LRP,
+                                     &key_aes, rnd_b16, 0x71, true);
+
+    nxpsc_set_rng(NULL, NULL);
+    check("DESFire auth handshake AF handling", ok);
 }
 
 static void test_file_settings(void) {
@@ -783,6 +877,7 @@ int main(void) {
     test_native_framing();
     test_iso_wrapping();
     test_iso_wrapping_zero_data();
+    test_desfire_authentication();
     test_file_settings();
     test_create_file_framing();
     test_value_and_data();

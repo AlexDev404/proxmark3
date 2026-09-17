@@ -867,7 +867,8 @@ static int auth_legacy(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *ke
     uint8_t resp[64] = {0};
     size_t resp_len = 0;
 
-    int rc = nxpsc_raw_exchange(card, cmd, &key_no, 1, &status, resp, sizeof(resp), &resp_len);
+    int rc = nxpsc_raw_exchange_ex(card, cmd, &key_no, 1, &status, resp, sizeof(resp), &resp_len,
+                                   false);
     if (rc != NXPSC_OK) {
         return rc;
     }
@@ -922,8 +923,8 @@ static int auth_legacy(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *ke
         }
     }
 
-    rc = nxpsc_raw_exchange(card, DF_ADDITIONAL_FRAME, both, rnd_len * 2, &status,
-                            resp, sizeof(resp), &resp_len);
+    rc = nxpsc_raw_exchange_ex(card, DF_ADDITIONAL_FRAME, both, rnd_len * 2, &status,
+                               resp, sizeof(resp), &resp_len, false);
     if (rc != NXPSC_OK) {
         return rc;
     }
@@ -977,8 +978,8 @@ static int auth_ev2(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
     uint8_t resp[64] = {0};
     size_t resp_len = 0;
 
-    int rc = nxpsc_raw_exchange(card, cmd, cdata, first ? 2 : 1, &status,
-                                resp, sizeof(resp), &resp_len);
+    int rc = nxpsc_raw_exchange_ex(card, cmd, cdata, first ? 2 : 1, &status,
+                                   resp, sizeof(resp), &resp_len, false);
     if (rc != NXPSC_OK) {
         return rc;
     }
@@ -1026,8 +1027,8 @@ static int auth_ev2(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
         return rc;
     }
 
-    rc = nxpsc_raw_exchange(card, DF_ADDITIONAL_FRAME, both, sizeof(both), &status,
-                            resp, sizeof(resp), &resp_len);
+    rc = nxpsc_raw_exchange_ex(card, DF_ADDITIONAL_FRAME, both, sizeof(both), &status,
+                               resp, sizeof(resp), &resp_len, false);
     if (rc != NXPSC_OK) {
         return rc;
     }
@@ -1095,8 +1096,8 @@ static int auth_lrp(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
     uint8_t resp[64] = {0};
     size_t resp_len = 0;
 
-    int rc = nxpsc_raw_exchange(card, cmd, cdata, first ? 3 : 1, &status,
-                                resp, sizeof(resp), &resp_len);
+    int rc = nxpsc_raw_exchange_ex(card, cmd, cdata, first ? 3 : 1, &status,
+                                   resp, sizeof(resp), &resp_len, false);
     if (rc != NXPSC_OK) {
         return rc;
     }
@@ -1130,8 +1131,8 @@ static int auth_lrp(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *key, 
     memcpy(both, rnd_a, NXPSC_AES_BLOCK);
     memcpy(both + NXPSC_AES_BLOCK, cmac, NXPSC_AES_BLOCK);
 
-    rc = nxpsc_raw_exchange(card, DF_ADDITIONAL_FRAME, both, sizeof(both), &status,
-                            resp, sizeof(resp), &resp_len);
+    rc = nxpsc_raw_exchange_ex(card, DF_ADDITIONAL_FRAME, both, sizeof(both), &status,
+                               resp, sizeof(resp), &resp_len, false);
     if (rc != NXPSC_OK) {
         return rc;
     }

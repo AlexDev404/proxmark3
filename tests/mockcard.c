@@ -19,6 +19,7 @@
 //-----------------------------------------------------------------------------
 
 #include "mockcard.h"
+#include "nxpsc_internal.h"
 #include "nxpsc_crypto.h"
 
 #include <string.h>
@@ -76,6 +77,7 @@ void mock_init(mock_card_t *mock, nxpsc_cardtype_t type) {
 
     static const uint8_t uid[7] = {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
     memcpy(mock->uid, uid, sizeof(uid));
+    memcpy(mock->auth_ti, "\xDE\xAD\xBE\xEF", sizeof(mock->auth_ti));
 }
 
 // GetVersion answers in three frames, the first two ask for continuation
@@ -130,6 +132,250 @@ static int version_frame(const mock_card_t *mock, uint8_t *rx, size_t cap, size_
 
 static bool is_plus(const mock_card_t *mock) {
     return (mock->type == PLUS_EV1) || (mock->type == PLUS_EV2);
+}
+
+static void rol(uint8_t *data, size_t len) {
+    uint8_t first = data[0];
+    memmove(data, data + 1, len - 1);
+    data[len - 1] = first;
+}
+
+static size_t auth_rnd_len(const mock_card_t *mock) {
+    switch (mock->auth_key_type) {
+        case NXPSC_KEY_3K3DES:
+        case NXPSC_KEY_AES128:
+        case NXPSC_KEY_AES256:
+            return NXPSC_AES_BLOCK;
+        case NXPSC_KEY_DES:
+        case NXPSC_KEY_2K3DES:
+            return NXPSC_DES_BLOCK;
+        default:
+            break;
+    }
+    return 0;
+}
+
+static void auth_abort(mock_card_t *mock) {
+    mock->auth_pending = false;
+    mock->auth_first = false;
+    mock->auth_cmd = 0;
+}
+
+static int auth_length_error(mock_card_t *mock, uint8_t *rx, size_t cap, size_t *rx_len) {
+    auth_abort(mock);
+    if (cap < 1) {
+        return NXPSC_E_LENGTH;
+    }
+    rx[0] = 0x7E;
+    *rx_len = 1;
+    return NXPSC_OK;
+}
+
+static int auth_begin_legacy(mock_card_t *mock, uint8_t cmd,
+                             uint8_t *rx, size_t cap, size_t *rx_len) {
+    size_t rnd_len = auth_rnd_len(mock);
+    uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+
+    if (rnd_len == 0 || cap < rnd_len + 1) {
+        return NXPSC_E_LENGTH;
+    }
+
+    rx[0] = 0xAF;
+    int rc = nxpsc_cbc_crypt_ex(mock->auth_key_type, mock->auth_key, iv,
+                                mock->auth_rnd_b, rnd_len, rx + 1, true, true);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    mock->auth_scheme = MOCK_AUTH_LEGACY;
+    mock->auth_pending = true;
+    mock->auth_cmd = cmd;
+    *rx_len = rnd_len + 1;
+    return NXPSC_OK;
+}
+
+static int auth_begin_ev2(mock_card_t *mock, bool first, uint8_t *rx, size_t cap, size_t *rx_len) {
+    uint8_t iv[NXPSC_AES_BLOCK] = {0};
+
+    if (cap < NXPSC_AES_BLOCK + 1) {
+        return NXPSC_E_LENGTH;
+    }
+
+    rx[0] = 0xAF;
+    int rc = nxpsc_cbc_crypt(NXPSC_KEY_AES128, mock->auth_key, iv,
+                             mock->auth_rnd_b, NXPSC_AES_BLOCK, rx + 1, true);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    mock->auth_pending = true;
+    mock->auth_first = first;
+    *rx_len = NXPSC_AES_BLOCK + 1;
+    return NXPSC_OK;
+}
+
+static int auth_begin_lrp(mock_card_t *mock, bool first, uint8_t *rx, size_t cap, size_t *rx_len) {
+    (void)first;
+    if (cap < NXPSC_AES_BLOCK + 2) {
+        return NXPSC_E_LENGTH;
+    }
+
+    rx[0] = 0xAF;
+    rx[1] = 0x01;
+    memcpy(rx + 2, mock->auth_rnd_b, NXPSC_AES_BLOCK);
+    mock->auth_pending = true;
+    mock->auth_first = first;
+    *rx_len = NXPSC_AES_BLOCK + 2;
+    return NXPSC_OK;
+}
+
+static int auth_continue_legacy(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
+                                uint8_t *rx, size_t cap, size_t *rx_len) {
+    (void)tx;
+    size_t rnd_len = auth_rnd_len(mock);
+    uint8_t rnd_a[NXPSC_AES_BLOCK] = {0};
+    uint8_t rot_a[NXPSC_AES_BLOCK] = {0};
+    uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+
+    if (rnd_len == 0 || tx_len != 1 + (rnd_len * 2) || cap < rnd_len + 1) {
+        return auth_length_error(mock, rx, cap, rx_len);
+    }
+
+    for (size_t i = 0; i < rnd_len; i++) {
+        rnd_a[i] = (uint8_t)(0x10 + i);
+    }
+    memcpy(rot_a, rnd_a, rnd_len);
+    rol(rot_a, rnd_len);
+
+    if (mock->auth_cmd == DF_AUTHENTICATE_ISO || mock->auth_cmd == DF_AUTHENTICATE_AES) {
+        uint8_t tmp[NXPSC_AES_BLOCK * 2] = {0};
+        uint8_t rot_b[NXPSC_AES_BLOCK] = {0};
+        memcpy(tmp, rnd_a, rnd_len);
+        memcpy(rot_b, mock->auth_rnd_b, rnd_len);
+        rol(rot_b, rnd_len);
+        memcpy(tmp + rnd_len, rot_b, rnd_len);
+
+        int rc = nxpsc_cbc_crypt_ex(mock->auth_key_type, mock->auth_key, iv,
+                                    tmp, rnd_len * 2, tmp, true, true);
+        if (rc != NXPSC_OK) {
+            return rc;
+        }
+    }
+
+    rx[0] = 0x00;
+    int rc = nxpsc_cbc_crypt_ex(mock->auth_key_type, mock->auth_key, iv,
+                                rot_a, rnd_len, rx + 1, true, true);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    *rx_len = rnd_len + 1;
+    auth_abort(mock);
+    return NXPSC_OK;
+}
+
+static int auth_continue_ev2(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
+                             uint8_t *rx, size_t cap, size_t *rx_len) {
+    (void)tx;
+    uint8_t rnd_a[NXPSC_AES_BLOCK] = {0};
+    uint8_t plain[NXPSC_AES_BLOCK * 2] = {0};
+    uint8_t iv[NXPSC_AES_BLOCK] = {0};
+    size_t plain_len = mock->auth_first ? (NXPSC_AES_BLOCK * 2) : NXPSC_AES_BLOCK;
+
+    if (tx_len != NXPSC_AES_BLOCK * 2 + 1 || cap < plain_len + 1) {
+        return auth_length_error(mock, rx, cap, rx_len);
+    }
+
+    for (size_t i = 0; i < sizeof(rnd_a); i++) {
+        rnd_a[i] = (uint8_t)(0x10 + i);
+    }
+
+    if (mock->auth_first) {
+        memcpy(plain, mock->auth_ti, sizeof(mock->auth_ti));
+        memcpy(plain + 4, rnd_a + 1, NXPSC_AES_BLOCK - 1);
+        plain[19] = rnd_a[0];
+    } else {
+        memcpy(plain, rnd_a + 1, NXPSC_AES_BLOCK - 1);
+        plain[15] = rnd_a[0];
+    }
+
+    rx[0] = 0x00;
+    int rc = nxpsc_cbc_crypt(NXPSC_KEY_AES128, mock->auth_key, iv,
+                             plain, plain_len, rx + 1, true);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    *rx_len = plain_len + 1;
+    auth_abort(mock);
+    return NXPSC_OK;
+}
+
+static int auth_continue_lrp(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
+                             uint8_t *rx, size_t cap, size_t *rx_len) {
+    (void)tx;
+    uint8_t rnd_a[NXPSC_AES_BLOCK] = {0};
+    uint8_t session[NXPSC_AES_BLOCK] = {0};
+    uint8_t input[NXPSC_AES_BLOCK * 3] = {0};
+    uint8_t cmac[NXPSC_AES_BLOCK] = {0};
+    uint8_t ti_block[NXPSC_AES_BLOCK] = {0};
+    nxpsc_lrp_ctx_t lrp;
+    size_t total = mock->auth_first ? (NXPSC_AES_BLOCK * 2) : NXPSC_AES_BLOCK;
+
+    if (tx_len != NXPSC_AES_BLOCK * 2 + 1 || cap < total + 1) {
+        return auth_length_error(mock, rx, cap, rx_len);
+    }
+
+    for (size_t i = 0; i < sizeof(rnd_a); i++) {
+        rnd_a[i] = (uint8_t)(0x10 + i);
+    }
+
+    int rc = nxpsc_session_key_lrp(mock->auth_key, rnd_a, mock->auth_rnd_b, false, session);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    memcpy(input, mock->auth_rnd_b, NXPSC_AES_BLOCK);
+    memcpy(input + NXPSC_AES_BLOCK, rnd_a, NXPSC_AES_BLOCK);
+    if (mock->auth_first) {
+        memcpy(ti_block, mock->auth_ti, sizeof(mock->auth_ti));
+        memcpy(input + (NXPSC_AES_BLOCK * 2), ti_block, NXPSC_AES_BLOCK);
+    }
+
+    nxpsc_lrp_init(&lrp, session, 0, true);
+    nxpsc_lrp_cmac(&lrp, input, mock->auth_first ? (NXPSC_AES_BLOCK * 3) : (NXPSC_AES_BLOCK * 2), cmac);
+
+    rx[0] = 0x00;
+    if (mock->auth_first) {
+        memcpy(rx + 1, ti_block, NXPSC_AES_BLOCK);
+        memcpy(rx + 1 + NXPSC_AES_BLOCK, cmac, NXPSC_AES_BLOCK);
+    } else {
+        memcpy(rx + 1, cmac, NXPSC_AES_BLOCK);
+    }
+
+    *rx_len = total + 1;
+    auth_abort(mock);
+    return NXPSC_OK;
+}
+
+static int auth_continue(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
+                         uint8_t *rx, size_t cap, size_t *rx_len) {
+    if (tx_len <= 1) {
+        return auth_length_error(mock, rx, cap, rx_len);
+    }
+
+    switch (mock->auth_scheme) {
+        case MOCK_AUTH_LEGACY:
+            return auth_continue_legacy(mock, tx, tx_len, rx, cap, rx_len);
+        case MOCK_AUTH_EV2:
+            return auth_continue_ev2(mock, tx, tx_len, rx, cap, rx_len);
+        case MOCK_AUTH_LRP:
+            return auth_continue_lrp(mock, tx, tx_len, rx, cap, rx_len);
+        case MOCK_AUTH_NONE:
+        default:
+            break;
+    }
+    return auth_length_error(mock, rx, cap, rx_len);
 }
 
 // MIFARE Plus answers 0x90 on success, the SL3 opcodes overlap with the
@@ -276,6 +522,9 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             return version_frame(mock, rx, cap, rx_len);
 
         case 0xAF:                      // additional frame
+            if (mock->auth_pending) {
+                return auth_continue(mock, tx, tx_len, rx, cap, rx_len);
+            }
             if (mock->in_version == false) {
                 // continuation of a long command, just acknowledge it
                 rx[0] = 0x00;
@@ -287,6 +536,19 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
                 mock->in_version = false;
             }
             return version_frame(mock, rx, cap, rx_len);
+
+        case 0x0A:
+        case 0x1A:
+        case 0xAA:
+            return auth_begin_legacy(mock, tx[0], rx, cap, rx_len);
+
+        case 0x71:
+        case 0x77:
+            if (mock->auth_scheme == MOCK_AUTH_LRP) {
+                return auth_begin_lrp(mock, tx_len > 2, rx, cap, rx_len);
+            }
+            mock->auth_scheme = MOCK_AUTH_EV2;
+            return auth_begin_ev2(mock, tx_len > 2, rx, cap, rx_len);
 
         case 0x5A:                      // SelectApplication
             if (tx_len >= 4) {

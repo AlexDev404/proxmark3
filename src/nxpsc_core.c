@@ -352,8 +352,9 @@ static int frame_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, 
     return NXPSC_OK;
 }
 
-int nxpsc_raw_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t len,
-                       uint8_t *status, uint8_t *resp, size_t cap, size_t *resp_len) {
+int nxpsc_raw_exchange_ex(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t len,
+                          uint8_t *status, uint8_t *resp, size_t cap, size_t *resp_len,
+                          bool follow_af) {
     if (card == NULL || status == NULL || resp == NULL || resp_len == NULL) {
         return NXPSC_E_PARAM;
     }
@@ -398,7 +399,7 @@ int nxpsc_raw_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, siz
     } while (sent < len);
 
     // response chaining in
-    while (*status == DF_S_ADDITIONAL_FRAME) {
+    while (follow_af && *status == DF_S_ADDITIONAL_FRAME) {
         size_t got = 0;
         rc = frame_exchange(card, DF_ADDITIONAL_FRAME, NULL, 0, status, chunk, sizeof(chunk), &got);
         if (rc != NXPSC_OK) {
@@ -415,6 +416,11 @@ int nxpsc_raw_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, siz
     *resp_len = total;
     card->last_status = *status;
     return NXPSC_OK;
+}
+
+int nxpsc_raw_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t len,
+                       uint8_t *status, uint8_t *resp, size_t cap, size_t *resp_len) {
+    return nxpsc_raw_exchange_ex(card, cmd, data, len, status, resp, cap, resp_len, true);
 }
 
 int nxpsc_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t len,

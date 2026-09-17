@@ -20,9 +20,17 @@
 #define NXPSC_MOCKCARD_H__
 
 #include "nxpsc/nxpsc.h"
+#include "nxpsc_crypto.h"
 
 #define MOCK_MAX_FRAMES     32
 #define MOCK_FRAME_SIZE     128
+
+typedef enum {
+    MOCK_AUTH_NONE = 0,
+    MOCK_AUTH_LEGACY,
+    MOCK_AUTH_EV2,
+    MOCK_AUTH_LRP,
+} mock_auth_scheme_t;
 
 typedef struct {
     nxpsc_cardtype_t type;
@@ -31,6 +39,14 @@ typedef struct {
     int version_step;
     bool in_version;
     uint8_t plus_last_op;
+    mock_auth_scheme_t auth_scheme;
+    bool auth_pending;
+    bool auth_first;
+    uint8_t auth_cmd;
+    nxpsc_keytype_t auth_key_type;
+    uint8_t auth_key[NXPSC_MAX_KEY_SIZE];
+    uint8_t auth_rnd_b[NXPSC_AES_BLOCK];
+    uint8_t auth_ti[4];
 
     uint8_t pc_exchanged[32];   // interleaved proximity check challenge and answer
     size_t pc_len;

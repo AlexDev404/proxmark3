@@ -197,6 +197,10 @@ size_t nxpsc_padded_len(size_t len, size_t block);
 // raw exchange, no secure channel. resp excludes the status byte
 int nxpsc_raw_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t len,
                        uint8_t *status, uint8_t *resp, size_t cap, size_t *resp_len);
+// variant for callers that must see authentication handshake 0xAF statuses
+int nxpsc_raw_exchange_ex(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t len,
+                          uint8_t *status, uint8_t *resp, size_t cap, size_t *resp_len,
+                          bool follow_af);
 // full exchange through the active secure channel
 int nxpsc_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t len,
                    nxpsc_mode_t tx_mode, nxpsc_mode_t rx_mode,
