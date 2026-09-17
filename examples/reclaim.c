@@ -17,8 +17,10 @@
 //
 // DESFire frees the AID when an application is deleted but not the non volatile
 // memory behind it, so a card that is repeatedly provisioned and wiped keeps
-// losing free memory until it can no longer create anything. FormatPICC is the
-// only command that gives that memory back.
+// losing free memory until CreateApplication starts answering 0x0E. How much
+// each cycle costs depends on what it created, an EV3 measured here lost 544
+// bytes of 5120 to one application holding six files. FormatPICC is the only
+// command that gives that memory back.
 //
 // Unlike the other examples this one talks to a real reader rather than the
 // loopback transport, so it doubles as the shortest complete PC/SC transport
