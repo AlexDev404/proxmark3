@@ -1,6 +1,0 @@
-PHDRS
-{
-    text PT_LOAD FLAGS(5);
-    data PT_LOAD;
-    bss PT_LOAD;
-}
