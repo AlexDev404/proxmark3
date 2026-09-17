@@ -32,6 +32,11 @@ static nxpsc_mode_t eff(const nxpsc_card_t *card, nxpsc_mode_t mode) {
     return mode;
 }
 
+// ISO chaining swaps the file access opcodes, the payloads stay identical
+static uint8_t file_cmd(const nxpsc_card_t *card, uint8_t native, uint8_t chained) {
+    return card->iso_chaining ? chained : native;
+}
+
 static void put_u24(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value & 0xFF);
     out[1] = (uint8_t)((value >> 8) & 0xFF);
@@ -739,8 +744,8 @@ int nxpsc_read_data(nxpsc_card_t *card, uint8_t file_no, uint32_t offset, uint32
     put_u24(data + 4, length);
 
     nxpsc_mode_t mode = eff(card, nxpsc_mode_from_public(comm));
-    return nxpsc_exchange(card, DF_READ_DATA, data, sizeof(data), mode, mode,
-                          out, cap, out_len);
+    return nxpsc_exchange(card, file_cmd(card, DF_READ_DATA, DF_READ_DATA2),
+                          data, sizeof(data), mode, mode, out, cap, out_len);
 }
 
 int nxpsc_write_data(nxpsc_card_t *card, uint8_t file_no, uint32_t offset,
@@ -766,7 +771,7 @@ int nxpsc_write_data(nxpsc_card_t *card, uint8_t file_no, uint32_t offset,
     size_t resp_len = 0;
     nxpsc_mode_t mode = eff(card, nxpsc_mode_from_public(comm));
 
-    int rc = nxpsc_exchange(card, DF_WRITE_DATA, buf, len + 7, mode,
+    int rc = nxpsc_exchange(card, file_cmd(card, DF_WRITE_DATA, DF_WRITE_DATA2), buf, len + 7, mode,
                             (mode == MODE_PLAIN) ? MODE_PLAIN : MODE_MAC,
                             resp, sizeof(resp), &resp_len);
     free(buf);
@@ -855,7 +860,40 @@ int nxpsc_write_record(nxpsc_card_t *card, uint8_t file_no, uint32_t offset,
     size_t resp_len = 0;
     nxpsc_mode_t mode = eff(card, nxpsc_mode_from_public(comm));
 
-    int rc = nxpsc_exchange(card, DF_WRITE_RECORD, buf, len + 7, mode,
+    int rc = nxpsc_exchange(card, file_cmd(card, DF_WRITE_RECORD, DF_WRITE_RECORD2), buf, len + 7, mode,
+                            (mode == MODE_PLAIN) ? MODE_PLAIN : MODE_MAC,
+                            resp, sizeof(resp), &resp_len);
+    free(buf);
+    return rc;
+}
+
+int nxpsc_update_record(nxpsc_card_t *card, uint8_t file_no, uint32_t record_no,
+                        uint32_t offset, const uint8_t *data, size_t len,
+                        nxpsc_commmode_t comm) {
+    if (card == NULL || (len > 0 && data == NULL)) {
+        return NXPSC_E_PARAM;
+    }
+    if (len > NXPSC_MAX_RESPONSE - 16) {
+        return NXPSC_E_LENGTH;
+    }
+
+    uint8_t *buf = calloc(len + 10, 1);
+    if (buf == NULL) {
+        return NXPSC_E_MEMORY;
+    }
+
+    buf[0] = file_no;
+    put_u24(buf + 1, record_no);
+    put_u24(buf + 4, offset);
+    put_u24(buf + 7, (uint32_t)len);
+    memcpy(buf + 10, data, len);
+
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    nxpsc_mode_t mode = eff(card, nxpsc_mode_from_public(comm));
+
+    int rc = nxpsc_exchange(card, file_cmd(card, DF_UPDATE_RECORD, DF_UPDATE_RECORD2),
+                            buf, len + 10, mode,
                             (mode == MODE_PLAIN) ? MODE_PLAIN : MODE_MAC,
                             resp, sizeof(resp), &resp_len);
     free(buf);
@@ -875,8 +913,8 @@ int nxpsc_read_records(nxpsc_card_t *card, uint8_t file_no, uint32_t record_no,
     put_u24(data + 4, record_count);
 
     nxpsc_mode_t mode = eff(card, nxpsc_mode_from_public(comm));
-    return nxpsc_exchange(card, DF_READ_RECORDS, data, sizeof(data), mode, mode,
-                          out, cap, out_len);
+    return nxpsc_exchange(card, file_cmd(card, DF_READ_RECORDS, DF_READ_RECORDS2),
+                          data, sizeof(data), mode, mode, out, cap, out_len);
 }
 
 int nxpsc_clear_record_file(nxpsc_card_t *card, uint8_t file_no) {

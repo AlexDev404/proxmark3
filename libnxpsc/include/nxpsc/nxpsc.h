@@ -323,6 +323,10 @@ int nxpsc_debit(nxpsc_card_t *card, uint8_t file_no, int32_t delta, nxpsc_commmo
 
 int nxpsc_write_record(nxpsc_card_t *card, uint8_t file_no, uint32_t offset,
                        const uint8_t *data, size_t len, nxpsc_commmode_t comm);
+// updates part of an existing record, record 0 is the most recent one
+int nxpsc_update_record(nxpsc_card_t *card, uint8_t file_no, uint32_t record_no,
+                        uint32_t offset, const uint8_t *data, size_t len,
+                        nxpsc_commmode_t comm);
 int nxpsc_read_records(nxpsc_card_t *card, uint8_t file_no, uint32_t record_no,
                        uint32_t record_count, nxpsc_commmode_t comm,
                        uint8_t *out, size_t cap, size_t *out_len);
@@ -333,6 +337,60 @@ int nxpsc_abort_transaction(nxpsc_card_t *card);
 // EV2 transaction MAC file support
 int nxpsc_commit_reader_id(nxpsc_card_t *card, const uint8_t *reader_id, size_t len,
                            uint8_t *enc_prev_reader_id, size_t cap, size_t *out_len);
+
+//-----------------------------------------------------------------------------
+// EV2 and later extras
+//-----------------------------------------------------------------------------
+// ISO chaining uses the 0xAD / 0x8D / 0xAB / 0x8B / 0xBA file access opcodes
+// instead of the native ones. Needed by readers that cannot do native chaining
+void nxpsc_set_iso_chaining(nxpsc_card_t *card, bool enable);
+bool nxpsc_get_iso_chaining(const nxpsc_card_t *card);
+
+// transaction MAC file, lets the back office verify a committed transaction
+int nxpsc_create_transaction_mac_file(nxpsc_card_t *card, uint8_t file_no,
+                                      nxpsc_commmode_t comm, const nxpsc_access_t *access,
+                                      const nxpsc_key_t *tm_key, uint8_t key_version);
+
+// delegated application management, for multi issuer cards
+typedef struct {
+    uint8_t dam_slot_version;
+    uint16_t quota_limit;
+    uint16_t free_blocks;
+    uint32_t aid;
+} nxpsc_delegate_info_t;
+
+// enck and dam_mac are produced by the DAM authority, see the card manual
+int nxpsc_create_delegated_application(nxpsc_card_t *card, uint32_t aid, uint16_t dam_slot,
+                                       uint8_t dam_slot_version, uint16_t quota_limit,
+                                       uint8_t key_settings, uint8_t num_keys,
+                                       nxpsc_keytype_t key_type,
+                                       uint16_t iso_fid, const uint8_t *df_name, size_t df_name_len,
+                                       const uint8_t *enck, size_t enck_len,
+                                       const uint8_t *dam_mac, size_t dam_mac_len);
+int nxpsc_get_delegated_info(nxpsc_card_t *card, uint16_t dam_slot, nxpsc_delegate_info_t *info);
+
+// MIFARE Classic mapping of EV2 XL and EV3, payload per card manual
+int nxpsc_create_mfc_mapping(nxpsc_card_t *card, const uint8_t *data, size_t len);
+int nxpsc_restrict_mfc_update(nxpsc_card_t *card, const uint8_t *data, size_t len);
+
+// used by ECP capable readers to tell the card a transaction completed
+int nxpsc_notify_transaction_success(nxpsc_card_t *card);
+
+// key sets. init, fill with nxpsc_change_key_ev2(), then finalize, then roll
+int nxpsc_init_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t num_keys,
+                       nxpsc_keytype_t key_type);
+int nxpsc_finalize_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t key_set_version);
+int nxpsc_roll_key_set(nxpsc_card_t *card, uint8_t key_set);
+
+// proximity check, the relay attack countermeasure. rounds is 1 to 8, mac_ok
+// receives whether the card answer MAC matched and may be NULL
+int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t rounds,
+                          bool *mac_ok);
+
+// SetConfiguration wrappers
+int nxpsc_set_picc_config(nxpsc_card_t *card, bool disable_format, bool random_uid);
+int nxpsc_set_default_key(nxpsc_card_t *card, const nxpsc_key_t *key);
+int nxpsc_set_ats(nxpsc_card_t *card, const uint8_t *ats, size_t len);
 
 //-----------------------------------------------------------------------------
 // ISO 7816-4 level access, shared by DESFire ISO mode and NTAG 4xx DNA
@@ -390,6 +448,18 @@ int nxpsc_plus_commit_perso(nxpsc_card_t *card);
 int nxpsc_plus_value_op(nxpsc_card_t *card, uint16_t block, int32_t delta, bool credit,
                         bool encrypted);
 int nxpsc_plus_transfer(nxpsc_card_t *card, uint16_t block);
+// value operation that transfers to the same block in one command
+int nxpsc_plus_value_transfer(nxpsc_card_t *card, uint16_t block, int32_t delta, bool credit,
+                              bool encrypted);
+int nxpsc_plus_restore(nxpsc_card_t *card, uint16_t block);
+// ends the session on the card as well as in the library
+int nxpsc_plus_reset_auth(nxpsc_card_t *card);
+// security level 1 configuration and UID personalisation, payload per manual
+int nxpsc_plus_set_config_sl1(nxpsc_card_t *card, const uint8_t *data, size_t len);
+int nxpsc_plus_personalize_uid(nxpsc_card_t *card, uint8_t uid_type);
+// virtual card support, asks whether the card answered the last ISO level 3
+int nxpsc_plus_vc_support_last_iso_l3(nxpsc_card_t *card, uint8_t *out, size_t cap,
+                                      size_t *out_len);
 
 //-----------------------------------------------------------------------------
 // escape hatch. sends a native DESFire command through the active secure

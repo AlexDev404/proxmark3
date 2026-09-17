@@ -46,6 +46,8 @@ int nxpsc_ntag424_select(nxpsc_card_t *card) {
     int rc = nxpsc_iso_select_df_name(card, ntag424_df_name, sizeof(ntag424_df_name));
     if (rc == NXPSC_OK) {
         card->selected_aid = 0x000001;
+        // the DNA tags expose file access as the ISO chained opcodes only
+        card->iso_chaining = true;
         nxpsc_reset_channel(card);
     }
     return rc;

@@ -322,6 +322,78 @@ static void test_guards(void) {
     nxpsc_close(card);
 }
 
+// the EV2 and later extras must put the documented opcodes on the wire
+static void test_advanced_commands(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV3);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    // ISO chaining swaps the file access opcodes but keeps the payload
+    nxpsc_set_iso_chaining(card, true);
+    ok = ok && (nxpsc_get_iso_chaining(card) == true);
+
+    uint8_t buf[64] = {0};
+    size_t len = 0;
+    mock.tx_count = 0;
+    nxpsc_read_data(card, 0x01, 0, 16, NXPSC_COMM_PLAIN, buf, sizeof(buf), &len);
+    ok = ok && (mock.tx_count == 1) && (mock.tx[0][0] == 0xAD) && (mock.tx_len[0] == 8);
+
+    nxpsc_set_iso_chaining(card, false);
+    mock.tx_count = 0;
+    nxpsc_read_data(card, 0x01, 0, 16, NXPSC_COMM_PLAIN, buf, sizeof(buf), &len);
+    ok = ok && (mock.tx_count == 1) && (mock.tx[0][0] == 0xBD);
+
+    // UpdateRecord carries file, record, offset and length before the data
+    const uint8_t rec[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+    mock.tx_count = 0;
+    nxpsc_update_record(card, 0x02, 0, 4, rec, sizeof(rec), NXPSC_COMM_PLAIN);
+    ok = ok && (mock.tx_count == 1) && (mock.tx[0][0] == 0xDB);
+    ok = ok && (mock.tx_len[0] == 1 + 10 + sizeof(rec));
+    ok = ok && (mock.tx[0][1] == 0x02) && (mock.tx[0][8] == 0x04) && (mock.tx[0][11] == 0xDE);
+
+    // key set management
+    mock.tx_count = 0;
+    nxpsc_init_key_set(card, 0x01, 3, NXPSC_KEY_AES128);
+    ok = ok && (mock.tx[0][0] == 0x56) && (mock.tx[0][1] == 0x01) && (mock.tx[0][2] == 0x83);
+    mock.tx_count = 0;
+    nxpsc_finalize_key_set(card, 0x01, 0x10);
+    ok = ok && (mock.tx[0][0] == 0x57);
+    mock.tx_count = 0;
+    nxpsc_roll_key_set(card, 0x01);
+    ok = ok && (mock.tx[0][0] == 0x55);
+
+    // delegated application management
+    mock.tx_count = 0;
+    nxpsc_get_delegated_info(card, 0x0102, NULL);
+    ok = ok && (mock.tx_count == 0);   // NULL out parameter must be rejected
+
+    // MIFARE Classic mapping and the transaction notification
+    const uint8_t mapping[8] = {0};
+    mock.tx_count = 0;
+    nxpsc_create_mfc_mapping(card, mapping, sizeof(mapping));
+    ok = ok && (mock.tx[0][0] == 0xCF);
+    mock.tx_count = 0;
+    nxpsc_notify_transaction_success(card);
+    ok = ok && (mock.tx[0][0] == 0xEE);
+
+    // argument checks on the new calls
+    ok = ok && (nxpsc_create_mfc_mapping(card, NULL, 4) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_proximity_check(card, NULL, 1, NULL) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_set_ats(card, mapping, 0) == NXPSC_E_PARAM);
+
+    nxpsc_key_t des = {.type = NXPSC_KEY_DES};
+    ok = ok && (nxpsc_proximity_check(card, &des, 1, NULL) == NXPSC_E_UNSUPPORTED);
+    ok = ok && (nxpsc_init_key_set(card, 0, 1, NXPSC_KEY_AES256) == NXPSC_E_UNSUPPORTED);
+
+    check("EV2 extras and ISO chaining", ok);
+    nxpsc_close(card);
+}
+
 int main(void) {
     printf("libnxpsc protocol tests\n");
 
@@ -335,6 +407,7 @@ int main(void) {
     test_access_roundtrip();
     test_sdm_settings();
     test_plus_perso();
+    test_advanced_commands();
     test_guards();
 
     if (failures > 0) {

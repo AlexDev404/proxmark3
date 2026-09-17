@@ -29,6 +29,7 @@ set(NXPSC_SOURCES
     src/nxpsc_crypto.c
     src/nxpsc_channel.c
     src/nxpsc_desfire.c
+    src/nxpsc_advanced.c
     src/nxpsc_ntag424.c
     src/nxpsc_plus.c
     src/nxpsc_selftest.c

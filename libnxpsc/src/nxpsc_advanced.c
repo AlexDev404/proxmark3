@@ -1,0 +1,456 @@
+//-----------------------------------------------------------------------------
+// Copyright (C) Proxmark3 contributors. See AUTHORS.md for details.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// See LICENSE.txt for the text of the license.
+//-----------------------------------------------------------------------------
+// libnxpsc - EV2 and later extras: delegated applications, MIFARE Classic
+// mapping, transaction MAC files, key sets and the proximity check
+//-----------------------------------------------------------------------------
+
+#include "nxpsc_internal.h"
+#include "nxpsc_crypto.h"
+
+#include <string.h>
+
+#define PC_CHALLENGE_LEN    8
+#define PC_MAC_LEN          8
+#define PC_MAX_ROUNDS       8
+
+// without a session every command is plain, no matter what the caller asked for
+static nxpsc_mode_t eff_mode(const nxpsc_card_t *card, nxpsc_mode_t mode) {
+    if (card->authenticated == false) {
+        return MODE_PLAIN;
+    }
+    return mode;
+}
+
+static void put_u24le(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)(value & 0xFF);
+    out[1] = (uint8_t)((value >> 8) & 0xFF);
+    out[2] = (uint8_t)((value >> 16) & 0xFF);
+}
+
+// AES CMAC truncated to its odd bytes, the form DESFire uses for 8 byte MACs
+static int cmac8(const uint8_t *key, const uint8_t *data, size_t len, uint8_t *mac8) {
+    uint8_t full[16] = {0};
+
+    int rc = nxpsc_cmac(NXPSC_KEY_AES128, key, NULL, data, len, 0, full);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    for (int i = 0; i < 8; i++) {
+        mac8[i] = full[i * 2 + 1];
+    }
+    return NXPSC_OK;
+}
+
+//-----------------------------------------------------------------------------
+// ISO chaining variants of the file access commands
+//-----------------------------------------------------------------------------
+void nxpsc_set_iso_chaining(nxpsc_card_t *card, bool enable) {
+    if (card != NULL) {
+        card->iso_chaining = enable;
+    }
+}
+
+bool nxpsc_get_iso_chaining(const nxpsc_card_t *card) {
+    return (card != NULL) ? card->iso_chaining : false;
+}
+
+//-----------------------------------------------------------------------------
+// transaction MAC file
+//-----------------------------------------------------------------------------
+int nxpsc_create_transaction_mac_file(nxpsc_card_t *card, uint8_t file_no,
+                                      nxpsc_commmode_t comm, const nxpsc_access_t *access,
+                                      const nxpsc_key_t *tm_key, uint8_t key_version) {
+    if (card == NULL || access == NULL || tm_key == NULL) {
+        return NXPSC_E_PARAM;
+    }
+    if (tm_key->type != NXPSC_KEY_AES128) {
+        return NXPSC_E_UNSUPPORTED;
+    }
+
+    uint8_t data[21] = {0};
+    size_t len = 0;
+
+    data[len++] = file_no;
+    data[len++] = (comm == NXPSC_COMM_FULL) ? 0x03 : ((comm == NXPSC_COMM_MAC) ? 0x01 : 0x00);
+
+    uint16_t rights = nxpsc_pack_access(access);
+    data[len++] = (uint8_t)(rights & 0xFF);
+    data[len++] = (uint8_t)(rights >> 8);
+
+    data[len++] = 0x02;                 // TMKeyOption, AES128
+    memcpy(data + len, tm_key->data, 16);
+    len += 16;
+    data[len++] = key_version;
+
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    // the key travels enciphered, so this command is always full mode
+    return nxpsc_exchange(card, DF_CREATE_TRANS_MAC_FILE, data, len, MODE_ENC, MODE_MAC,
+                          resp, sizeof(resp), &resp_len);
+}
+
+//-----------------------------------------------------------------------------
+// delegated application management
+//-----------------------------------------------------------------------------
+int nxpsc_create_delegated_application(nxpsc_card_t *card, uint32_t aid, uint16_t dam_slot,
+                                       uint8_t dam_slot_version, uint16_t quota_limit,
+                                       uint8_t key_settings, uint8_t num_keys,
+                                       nxpsc_keytype_t key_type,
+                                       uint16_t iso_fid, const uint8_t *df_name, size_t df_name_len,
+                                       const uint8_t *enck, size_t enck_len,
+                                       const uint8_t *dam_mac, size_t dam_mac_len) {
+
+    if (card == NULL || enck == NULL || dam_mac == NULL) {
+        return NXPSC_E_PARAM;
+    }
+    if (df_name_len > 16 || (df_name_len > 0 && df_name == NULL)) {
+        return NXPSC_E_PARAM;
+    }
+    if (enck_len > 32 || dam_mac_len > 16) {
+        return NXPSC_E_LENGTH;
+    }
+
+    uint8_t data[96] = {0};
+    size_t len = 0;
+
+    put_u24le(data, aid);
+    len = 3;
+    data[len++] = (uint8_t)(dam_slot & 0xFF);
+    data[len++] = (uint8_t)(dam_slot >> 8);
+    data[len++] = dam_slot_version;
+    data[len++] = (uint8_t)(quota_limit & 0xFF);
+    data[len++] = (uint8_t)(quota_limit >> 8);
+
+    data[len++] = key_settings;
+    uint8_t key_byte = (uint8_t)(num_keys & 0x0F);
+    switch (key_type) {
+        case NXPSC_KEY_3K3DES:
+            key_byte |= 0x40;
+            break;
+        case NXPSC_KEY_AES128:
+            key_byte |= 0x80;
+            break;
+        default:
+            break;
+    }
+    if (iso_fid != 0 || df_name_len > 0) {
+        key_byte |= 0x20;
+    }
+    data[len++] = key_byte;
+
+    if ((key_byte & 0x20) != 0) {
+        data[len++] = (uint8_t)(iso_fid & 0xFF);
+        data[len++] = (uint8_t)(iso_fid >> 8);
+        if (df_name_len > 0) {
+            memcpy(data + len, df_name, df_name_len);
+            len += df_name_len;
+        }
+    }
+
+    // the encrypted key material and the DAM MAC follow as continuation data
+    memcpy(data + len, enck, enck_len);
+    len += enck_len;
+    memcpy(data + len, dam_mac, dam_mac_len);
+    len += dam_mac_len;
+
+    uint8_t resp[32] = {0};
+    size_t resp_len = 0;
+    return nxpsc_exchange(card, DF_CREATE_DELEGATED_APP, data, len, MODE_MAC, MODE_MAC,
+                          resp, sizeof(resp), &resp_len);
+}
+
+int nxpsc_get_delegated_info(nxpsc_card_t *card, uint16_t dam_slot,
+                             nxpsc_delegate_info_t *info) {
+    if (card == NULL || info == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t data[2] = { (uint8_t)(dam_slot & 0xFF), (uint8_t)(dam_slot >> 8) };
+    uint8_t resp[32] = {0};
+    size_t resp_len = 0;
+
+    int rc = nxpsc_exchange(card, DF_GET_DELEGATE_INFO, data, sizeof(data), MODE_MAC, MODE_MAC,
+                            resp, sizeof(resp), &resp_len);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+    if (resp_len < 8) {
+        return NXPSC_E_LENGTH;
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->dam_slot_version = resp[0];
+    info->quota_limit = (uint16_t)(resp[1] | (resp[2] << 8));
+    info->free_blocks = (uint16_t)(resp[3] | (resp[4] << 8));
+    info->aid = (uint32_t)resp[5] | ((uint32_t)resp[6] << 8) | ((uint32_t)resp[7] << 16);
+    return NXPSC_OK;
+}
+
+//-----------------------------------------------------------------------------
+// MIFARE Classic mapping, EV2 XL and EV3
+//-----------------------------------------------------------------------------
+int nxpsc_create_mfc_mapping(nxpsc_card_t *card, const uint8_t *data, size_t len) {
+    if (card == NULL || data == NULL || len == 0 || len > 64) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    // the mapping carries key material, the card only accepts it enciphered
+    return nxpsc_exchange(card, DF_CREATE_MFC_MAPPING, data, len, MODE_ENC, MODE_MAC,
+                          resp, sizeof(resp), &resp_len);
+}
+
+int nxpsc_restrict_mfc_update(nxpsc_card_t *card, const uint8_t *data, size_t len) {
+    if (card == NULL || (len > 0 && data == NULL) || len > 32) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    return nxpsc_exchange(card, DF_RESTRICT_MFC_UPDATE, data, len, eff_mode(card, MODE_MAC),
+                          eff_mode(card, MODE_MAC), resp, sizeof(resp), &resp_len);
+}
+
+//-----------------------------------------------------------------------------
+// transaction notification, used by ECP capable readers
+//-----------------------------------------------------------------------------
+int nxpsc_notify_transaction_success(nxpsc_card_t *card) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    return nxpsc_exchange(card, DF_NOTIFY_TX_SUCCESS, NULL, 0, eff_mode(card, MODE_MAC),
+                          eff_mode(card, MODE_MAC), resp, sizeof(resp), &resp_len);
+}
+
+//-----------------------------------------------------------------------------
+// key set management, EV2 and later
+//-----------------------------------------------------------------------------
+int nxpsc_init_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t num_keys,
+                       nxpsc_keytype_t key_type) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t key_byte = (uint8_t)(num_keys & 0x0F);
+    switch (key_type) {
+        case NXPSC_KEY_3K3DES:
+            key_byte |= 0x40;
+            break;
+        case NXPSC_KEY_AES128:
+            key_byte |= 0x80;
+            break;
+        case NXPSC_KEY_DES:
+        case NXPSC_KEY_2K3DES:
+            break;
+        default:
+            return NXPSC_E_UNSUPPORTED;
+    }
+
+    uint8_t data[2] = { key_set, key_byte };
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    return nxpsc_exchange(card, DF_INIT_KEY_SETTINGS, data, sizeof(data), MODE_MAC, MODE_MAC,
+                          resp, sizeof(resp), &resp_len);
+}
+
+int nxpsc_finalize_key_set(nxpsc_card_t *card, uint8_t key_set, uint8_t key_set_version) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t data[2] = { key_set, key_set_version };
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    return nxpsc_exchange(card, DF_FINALIZE_KEY_SETTINGS, data, sizeof(data), MODE_MAC, MODE_MAC,
+                          resp, sizeof(resp), &resp_len);
+}
+
+int nxpsc_roll_key_set(nxpsc_card_t *card, uint8_t key_set) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    return nxpsc_exchange(card, DF_ROLL_KEY_SETTINGS, &key_set, 1, MODE_MAC, MODE_MAC,
+                          resp, sizeof(resp), &resp_len);
+}
+
+//-----------------------------------------------------------------------------
+// proximity check, the relay attack countermeasure of EV2 and later
+//-----------------------------------------------------------------------------
+int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t rounds,
+                          bool *mac_ok) {
+
+    if (card == NULL || pc_key == NULL || rounds < 1 || rounds > PC_MAX_ROUNDS) {
+        return NXPSC_E_PARAM;
+    }
+    if (pc_key->type != NXPSC_KEY_AES128) {
+        return NXPSC_E_UNSUPPORTED;
+    }
+
+    if (mac_ok != NULL) {
+        *mac_ok = false;
+    }
+
+    uint8_t challenge[PC_CHALLENGE_LEN] = {0};
+    int rc = nxpsc_random_bytes(challenge, sizeof(challenge));
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    // PreparePC returns the timing options, and on some cards one extra byte
+    uint8_t status = 0;
+    uint8_t prep[16] = {0};
+    size_t prep_len = 0;
+
+    rc = nxpsc_raw_exchange(card, DF_PREPARE_PC, NULL, 0, &status, prep, sizeof(prep), &prep_len);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+    if (status != DF_S_OK) {
+        nxpsc_reset_channel(card);
+        return NXPSC_E_CARD;
+    }
+
+    size_t opt_len = (prep_len < 3) ? prep_len : 3;
+    bool has_ext = (prep_len > 3);
+    uint8_t ext = has_ext ? prep[3] : 0x00;
+
+    // the challenge is split over the requested number of rounds, the card
+    // answers each part, and both halves are interleaved for the final MAC
+    uint8_t exchanged[PC_CHALLENGE_LEN * 2] = {0};
+    size_t exchanged_len = 0;
+    size_t offset = 0;
+    size_t split = PC_CHALLENGE_LEN / rounds;
+    if (split == 0) {
+        split = 1;
+    }
+
+    for (uint8_t round = 0; round < rounds; round++) {
+        size_t remaining = PC_CHALLENGE_LEN - offset;
+        size_t part = ((round + 1) == rounds) ? remaining : ((split < remaining) ? split : remaining);
+        if (part == 0) {
+            return NXPSC_E_PARAM;
+        }
+
+        uint8_t payload[1 + PC_CHALLENGE_LEN] = {0};
+        payload[0] = (uint8_t)part;
+        memcpy(payload + 1, challenge + offset, part);
+
+        uint8_t answer[32] = {0};
+        size_t answer_len = 0;
+        rc = nxpsc_raw_exchange(card, DF_PROXIMITY_CHECK, payload, part + 1, &status,
+                                answer, sizeof(answer), &answer_len);
+        if (rc != NXPSC_OK) {
+            return rc;
+        }
+        if (status != DF_S_OK) {
+            nxpsc_reset_channel(card);
+            return NXPSC_E_CARD;
+        }
+
+        size_t slice = (answer_len < part) ? answer_len : part;
+        memcpy(exchanged + exchanged_len, answer, slice);
+        exchanged_len += slice;
+        memcpy(exchanged + exchanged_len, challenge + offset, part);
+        exchanged_len += part;
+
+        offset += part;
+    }
+
+    uint8_t mac_input[1 + 3 + 1 + (PC_CHALLENGE_LEN * 2)] = {0};
+    size_t mac_input_len = 0;
+
+    mac_input[mac_input_len++] = DF_VERIFY_PC;
+    memcpy(mac_input + mac_input_len, prep, opt_len);
+    mac_input_len += opt_len;
+    if (has_ext) {
+        mac_input[mac_input_len++] = ext;
+    }
+    memcpy(mac_input + mac_input_len, exchanged, exchanged_len);
+    mac_input_len += exchanged_len;
+
+    uint8_t mac[PC_MAC_LEN] = {0};
+    rc = cmac8(pc_key->data, mac_input, mac_input_len, mac);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    uint8_t verify[32] = {0};
+    size_t verify_len = 0;
+    rc = nxpsc_raw_exchange(card, DF_VERIFY_PC, mac, sizeof(mac), &status,
+                            verify, sizeof(verify), &verify_len);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+    if (status != DF_S_OK) {
+        nxpsc_reset_channel(card);
+        return NXPSC_E_CARD;
+    }
+
+    if (verify_len >= PC_MAC_LEN && mac_ok != NULL) {
+        // same input with the response status in place of the command byte
+        mac_input[0] = DF_S_SIGNATURE;
+
+        uint8_t expected[PC_MAC_LEN] = {0};
+        rc = cmac8(pc_key->data, mac_input, mac_input_len, expected);
+        if (rc != NXPSC_OK) {
+            return rc;
+        }
+        *mac_ok = (memcmp(verify, expected, PC_MAC_LEN) == 0);
+    }
+
+    return NXPSC_OK;
+}
+
+//-----------------------------------------------------------------------------
+// SetConfiguration convenience wrappers
+//-----------------------------------------------------------------------------
+int nxpsc_set_picc_config(nxpsc_card_t *card, bool disable_format, bool random_uid) {
+    uint8_t value = (uint8_t)((disable_format ? 0x00 : 0x01) | (random_uid ? 0x02 : 0x00));
+    return nxpsc_set_configuration(card, 0x00, &value, 1);
+}
+
+int nxpsc_set_default_key(nxpsc_card_t *card, const nxpsc_key_t *key) {
+    if (card == NULL || key == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    size_t key_len = nxpsc_key_size(key->type);
+    if (key_len == 0 || key_len > 24) {
+        return NXPSC_E_UNSUPPORTED;
+    }
+
+    uint8_t data[25] = {0};
+    memcpy(data, key->data, key_len);
+    // the payload is always 24 bytes of key plus the version byte
+    data[24] = key->version;
+
+    return nxpsc_set_configuration(card, 0x01, data, sizeof(data));
+}
+
+int nxpsc_set_ats(nxpsc_card_t *card, const uint8_t *ats, size_t len) {
+    if (card == NULL || ats == NULL || len == 0 || len > 32) {
+        return NXPSC_E_PARAM;
+    }
+    return nxpsc_set_configuration(card, 0x02, ats, len);
+}

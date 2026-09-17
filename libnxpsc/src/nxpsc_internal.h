@@ -82,6 +82,27 @@
 #define DF_COMMIT_TRANSACTION       0xC7
 #define DF_ABORT_TRANSACTION        0xA7
 #define DF_COMMIT_READER_ID         0xC8
+#define DF_NOTIFY_TX_SUCCESS        0xEE
+
+// ISO chaining variants of the file access commands, EV2 and later
+#define DF_READ_DATA2               0xAD
+#define DF_WRITE_DATA2              0x8D
+#define DF_READ_RECORDS2            0xAB
+#define DF_WRITE_RECORD2            0x8B
+#define DF_UPDATE_RECORD2           0xBA
+
+// delegated application management, EV2 and later
+#define DF_CREATE_DELEGATED_APP     0xC9
+#define DF_GET_DELEGATE_INFO        0x69
+
+// MIFARE Classic mapping, EV2 XL / EV3
+#define DF_CREATE_MFC_MAPPING       0xCF
+#define DF_RESTRICT_MFC_UPDATE      0xBF
+
+// proximity check
+#define DF_PREPARE_PC               0xF0
+#define DF_PROXIMITY_CHECK          0xF2
+#define DF_VERIFY_PC                0xFD
 
 // ISO 7816-4
 #define ISO_CLA_WRAP                0x90
@@ -107,6 +128,13 @@
 #define MFP_INCREMENT_ENC           0xB1
 #define MFP_DECREMENT_ENC           0xB3
 #define MFP_TRANSFER                0xB5
+#define MFP_INCREMENT_TRANSFER_ENC  0xB7
+#define MFP_DECREMENT_TRANSFER_ENC  0xB9
+#define MFP_RESTORE                 0xC3
+#define MFP_RESET_AUTH              0x78
+#define MFP_SET_CONFIG_SL1          0x44
+#define MFP_PERSONALIZE_UID_USAGE   0x40
+#define MFP_VC_SUPPORT_LAST_ISO_L3  0x4B
 
 // status bytes
 #define DF_S_OK                     0x00
@@ -157,6 +185,7 @@ struct nxpsc_card {
     uint8_t uid[10];
     size_t uid_len;
 
+    bool iso_chaining;              // use the 0xAD / 0x8D style opcodes
     bool version_read;
     nxpsc_version_t version;
     nxpsc_cardtype_t type;

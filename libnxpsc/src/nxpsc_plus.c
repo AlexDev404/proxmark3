@@ -435,6 +435,109 @@ int nxpsc_plus_value_op(nxpsc_card_t *card, uint16_t block, int32_t delta, bool 
     return plus_write_block(card, opcode, block, value, sizeof(value), encrypted);
 }
 
+int nxpsc_plus_value_transfer(nxpsc_card_t *card, uint16_t block, int32_t delta, bool credit,
+                              bool encrypted) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+    if (card->authenticated == false) {
+        return NXPSC_E_AUTH;
+    }
+
+    uint8_t value[MFP_BLOCK_SIZE] = {0};
+    uint32_t raw = (uint32_t)delta;
+
+    value[0] = (uint8_t)(raw & 0xFF);
+    value[1] = (uint8_t)((raw >> 8) & 0xFF);
+    value[2] = (uint8_t)((raw >> 16) & 0xFF);
+    value[3] = (uint8_t)((raw >> 24) & 0xFF);
+
+    uint8_t opcode = credit ? MFP_INCREMENT_TRANSFER_ENC : MFP_DECREMENT_TRANSFER_ENC;
+    if (encrypted == false) {
+        opcode ^= 0x02;
+    }
+    return plus_write_block(card, opcode, block, value, sizeof(value), encrypted);
+}
+
+int nxpsc_plus_restore(nxpsc_card_t *card, uint16_t block) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+    if (card->authenticated == false) {
+        return NXPSC_E_AUTH;
+    }
+
+    // Restore takes no data, only the source block and the command MAC
+    uint8_t cmd[3 + 8] = {MFP_RESTORE, (uint8_t)(block & 0xFF), (uint8_t)((block >> 8) & 0xFF)};
+    uint8_t mac[8] = {0};
+
+    int rc = plus_mac(card, MAC_WRITE_CMD, block, 1, cmd, 3, mac);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+    memcpy(cmd + 3, mac, sizeof(mac));
+
+    uint8_t resp[32] = {0};
+    size_t resp_len = 0;
+
+    rc = plus_transceive(card, cmd, sizeof(cmd), resp, sizeof(resp), &resp_len);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    card->plus_w_ctr++;
+    return NXPSC_OK;
+}
+
+int nxpsc_plus_reset_auth(nxpsc_card_t *card) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t cmd[1] = {MFP_RESET_AUTH};
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+
+    int rc = plus_transceive(card, cmd, sizeof(cmd), resp, sizeof(resp), &resp_len);
+    // the card drops the session either way, follow it
+    nxpsc_reset_channel(card);
+    return rc;
+}
+
+int nxpsc_plus_set_config_sl1(nxpsc_card_t *card, const uint8_t *data, size_t len) {
+    if (card == NULL || data == NULL || len == 0 || len > 32) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t cmd[1 + 32] = {MFP_SET_CONFIG_SL1};
+    memcpy(cmd + 1, data, len);
+
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    return plus_transceive(card, cmd, len + 1, resp, sizeof(resp), &resp_len);
+}
+
+int nxpsc_plus_personalize_uid(nxpsc_card_t *card, uint8_t uid_type) {
+    if (card == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t cmd[2] = {MFP_PERSONALIZE_UID_USAGE, uid_type};
+    uint8_t resp[16] = {0};
+    size_t resp_len = 0;
+    return plus_transceive(card, cmd, sizeof(cmd), resp, sizeof(resp), &resp_len);
+}
+
+int nxpsc_plus_vc_support_last_iso_l3(nxpsc_card_t *card, uint8_t *out, size_t cap,
+                                      size_t *out_len) {
+    if (card == NULL || out == NULL || out_len == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t cmd[1] = {MFP_VC_SUPPORT_LAST_ISO_L3};
+    return plus_transceive(card, cmd, sizeof(cmd), out, cap, out_len);
+}
+
 int nxpsc_plus_transfer(nxpsc_card_t *card, uint16_t block) {
     if (card == NULL) {
         return NXPSC_E_PARAM;

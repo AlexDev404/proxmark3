@@ -1,0 +1,53 @@
+name: libnxpsc
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cc: [gcc, clang]
+        include:
+          - os: windows-latest
+            cc: msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "${{ matrix.cc }}" = "msvc" ]; then
+            cmake -S . -B build
+          else
+            CC=${{ matrix.cc }} cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -C Release
+
+  warnings:
+    name: warning free build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with warnings as errors
+        run: |
+          CC=${{ matrix.cc }} cmake -S . -B build -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
+          cmake --build build
+          cd build && ctest --output-on-failure
