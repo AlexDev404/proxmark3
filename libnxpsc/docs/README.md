@@ -31,6 +31,7 @@ Supported card families:
 
 ### Card notes
 - [DESFire](desfire.md)
+- [EV2 and later extras](advanced.md)
 - [MIFARE Plus](mifare_plus.md)
 - [NTAG 424 DNA and secure dynamic messaging](ntag424.md)
 

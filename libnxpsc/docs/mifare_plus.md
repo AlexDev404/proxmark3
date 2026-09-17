@@ -10,6 +10,7 @@ access is AES authenticated and optionally enciphered.
 - [Reading and writing](#reading-and-writing)
 - [Value blocks](#value-blocks)
 - [Personalisation](#personalisation)
+- [Level 1 configuration and virtual cards](#level-1-configuration-and-virtual-cards)
 
 ## Security levels
 ^[Top](#top)
@@ -43,12 +44,27 @@ answer means the session must be restarted with `nxpsc_reset_channel()`.
 and flags selecting whether the data is enciphered and whether the card has to
 return a MAC. Blocks are 16 bytes.
 
+`nxpsc_plus_reset_auth()` sends `0x78`, which ends the session on the card. The
+library drops its own session state with it, so the next operation has to
+authenticate again. Use it to release a card cleanly rather than walking away
+from an open session.
+
 ## Value blocks
 ^[Top](#top)
 
 `nxpsc_plus_value_op()` performs increment and decrement into the transfer
-buffer, and `nxpsc_plus_transfer()` writes that buffer back to a block.
-As on a Classic card, nothing is durable until the transfer.
+buffer, and `nxpsc_plus_transfer()` writes that buffer back to a block. As on a
+Classic card, nothing is durable until the transfer.
+
+Two shortcuts avoid the second round trip:
+
+| Call | Opcodes | Effect |
+|---|---|---|
+| `nxpsc_plus_value_transfer()` | `0xB7` / `0xB9`, `^0x02` when plain | increment or decrement and transfer in one command |
+| `nxpsc_plus_restore()` | `0xC3` | load a block back into the transfer buffer, undoing an uncommitted change |
+
+A terminal that debits a purse should prefer `nxpsc_plus_value_transfer()`: one
+command means one place where a card can be torn from the field.
 
 ## Personalisation
 ^[Top](#top)
@@ -57,3 +73,17 @@ As on a Classic card, nothing is durable until the transfer.
 is still in SL0, `nxpsc_plus_commit_perso()` locks the result in. A typical
 issuing sequence writes the card master key, the configuration key, the sector
 keys, and then commits.
+
+`nxpsc_plus_personalize_uid()` sends `0x40`, selecting how the card presents its
+UID: the real one, a random one, or a single size one. Decide this before
+committing, privacy requirements are hard to retrofit.
+
+## Level 1 configuration and virtual cards
+^[Top](#top)
+
+`nxpsc_plus_set_config_sl1()` sends `0x44`, the security level 1 configuration
+block, whose payload is defined by the card manual and passed through unchanged.
+
+`nxpsc_plus_vc_support_last_iso_l3()` sends `0x4B`, which asks the card whether
+it answered the last ISO level 3 command. Virtual card deployments use it to
+decide which of several card representations the reader is talking to.

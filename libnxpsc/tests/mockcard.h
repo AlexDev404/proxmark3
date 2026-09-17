@@ -29,12 +29,19 @@ typedef struct {
     uint8_t uid[7];
     uint32_t selected_aid;
     int version_step;
+    bool in_version;
     uint8_t plus_last_op;
+
+    uint8_t pc_exchanged[32];   // interleaved proximity check challenge and answer
+    size_t pc_len;
+    bool pc_bad_mac;            // make the card answer with a wrong MAC
 
     uint8_t tx[MOCK_MAX_FRAMES][MOCK_FRAME_SIZE];
     size_t tx_len[MOCK_MAX_FRAMES];
     size_t tx_count;
 } mock_card_t;
+
+extern const uint8_t mock_pc_key[16];
 
 size_t mock_family_count(void);
 nxpsc_cardtype_t mock_family_type(size_t index);

@@ -34,7 +34,15 @@ answers `GetVersion` for each supported family, so the suite checks, per family:
 - the exact bytes put on the wire for native and ISO wrapped command sets
 - 0xAF chaining of long answers
 - NTAG 424 SDM settings serialisation, with and without SDM enabled
-- MIFARE Plus personalisation framing
+- MIFARE Plus personalisation framing, plus value transfer, restore, reset auth,
+  SL1 configuration, UID personalisation and virtual card support
+- ISO chained file access opcodes, and `UpdateRecord` field layout
+- key set init, finalize and roll
+- delegated application creation, including the command chaining of its 57 byte
+  payload, and the parsing of `GetDelegatedInfo`
+- transaction MAC file creation framing
+- a full proximity check run: the mock computes the same AES CMAC from the same
+  interleaved challenge, so a wrong card MAC is proven to be reported
 - argument validation and the behaviour of commands issued without a session
 
 This is what lets CI state compatibility with a card family without owning one.

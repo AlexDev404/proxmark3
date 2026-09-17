@@ -101,7 +101,10 @@ if(NXPSC_BUILD_TESTS)
 
     add_executable(nxpsc_test_protocol tests/test_protocol.c tests/mockcard.c)
     target_link_libraries(nxpsc_test_protocol PRIVATE nxpsc)
-    target_include_directories(nxpsc_test_protocol PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_include_directories(nxpsc_test_protocol PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
     target_compile_options(nxpsc_test_protocol PRIVATE ${NXPSC_WARNINGS})
     if(WIN32)
         target_link_libraries(nxpsc_test_protocol PRIVATE bcrypt)

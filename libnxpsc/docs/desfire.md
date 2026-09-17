@@ -24,6 +24,7 @@ is about the API.
   - [Read and write files](#read-and-write-files)
   - [Work with value files](#work-with-value-files)
   - [Work with the transaction MAC](#work-with-the-transaction-mac)
+  - [Update a record in place](#update-a-record-in-place)
   - [Switch DESFire Light to LRP mode](#switch-desfire-light-to-lrp-mode)
 
 ## Documentation
@@ -176,15 +177,28 @@ handle the 0xAF chaining of long transfers internally.
 `nxpsc_limited_credit()`. Backup, value and record files only become permanent
 after `nxpsc_commit_transaction()`; `nxpsc_abort_transaction()` discards.
 
+### Update a record in place
+
+`nxpsc_update_record()` rewrites part of an existing record, record 0 being the
+most recent one, where `nxpsc_write_record()` appends a new one.
+
 ### Work with the transaction MAC
 
-Transaction MAC files let a terminal prove a transaction happened. There is no
-dedicated helper yet, create the file with `nxpsc_command()` and the native
-`CreateTransactionMACFile` opcode `0xCE`, then call `nxpsc_commit_reader_id()`
+Transaction MAC files let a terminal prove a transaction happened. Create one
+with `nxpsc_create_transaction_mac_file()`, then call `nxpsc_commit_reader_id()`
 inside the transaction. The transaction MAC session keys are derived by the
-library.
+library. See [EV2 and later extras](advanced.md#transaction-mac-files).
 
 ### Switch DESFire Light to LRP mode
 
 `nxpsc_set_configuration()` with the option and payload from the card manual,
 then authenticate with `NXPSC_CHAN_LRP`.
+
+## Beyond the classic command set
+^[Top](#top)
+
+Delegated applications, MIFARE Classic mapping, key sets, the proximity check,
+ISO chained file access and the `SetConfiguration` wrappers are documented
+separately in [EV2 and later extras](advanced.md). Anything not wrapped at all is
+still reachable with `nxpsc_command()`, which sends a raw native opcode through
+the active secure channel.

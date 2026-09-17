@@ -19,8 +19,15 @@
 //-----------------------------------------------------------------------------
 
 #include "mockcard.h"
+#include "nxpsc_crypto.h"
 
 #include <string.h>
+
+// the proximity check key the mock answers with, the tests use the same one
+const uint8_t mock_pc_key[16] = {
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+};
 
 typedef struct {
     nxpsc_cardtype_t type;
@@ -176,8 +183,17 @@ int mock_transceive(void *ctx, const uint8_t *tx, size_t tx_len,
     return native_frame(mock, tx, tx_len, rx, cap, rx_len);
 }
 
+#define MOCK_TX_FRAME_MAX   54
+
 static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
                         uint8_t *rx, size_t cap, size_t *rx_len) {
+    // a full frame means the library is chaining, ask for the next one
+    if (mock->in_version == false && tx_len == MOCK_TX_FRAME_MAX + 1) {
+        rx[0] = 0xAF;
+        *rx_len = 1;
+        return NXPSC_OK;
+    }
+
     if (is_plus(mock) && tx[0] != 0x60 && tx[0] != 0xAF && tx[0] != 0x00) {
         return plus_frame(mock, tx, tx_len, rx, cap, rx_len);
     }
@@ -228,10 +244,20 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
     switch (tx[0]) {
         case 0x60:                      // GetVersion
             mock->version_step = 0;
+            mock->in_version = true;
             return version_frame(mock, rx, cap, rx_len);
 
         case 0xAF:                      // additional frame
+            if (mock->in_version == false) {
+                // continuation of a long command, just acknowledge it
+                rx[0] = 0x00;
+                *rx_len = 1;
+                return NXPSC_OK;
+            }
             mock->version_step++;
+            if (mock->version_step >= 2) {
+                mock->in_version = false;
+            }
             return version_frame(mock, rx, cap, rx_len);
 
         case 0x5A:                      // SelectApplication
@@ -322,6 +348,84 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             rx[3] = 0x00;
             *rx_len = 4;
             return NXPSC_OK;
+
+        case 0x69:                      // GetDelegatedInfo
+            if (cap < 9) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            rx[1] = 0x05;               // DAM slot version
+            rx[2] = 0x10;               // quota limit
+            rx[3] = 0x00;
+            rx[4] = 0x20;               // free blocks
+            rx[5] = 0x00;
+            rx[6] = 0x11;               // AID
+            rx[7] = 0x22;
+            rx[8] = 0x33;
+            *rx_len = 9;
+            return NXPSC_OK;
+
+        case 0xF0:                      // PreparePC
+            if (cap < 4) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            rx[1] = 0x01;               // option bytes
+            rx[2] = 0x02;
+            rx[3] = 0x03;
+            *rx_len = 4;
+            mock->pc_len = 0;
+            return NXPSC_OK;
+
+        case 0xF2: {                    // ProximityCheck, echo the challenge back
+            size_t part = (tx_len >= 2) ? tx[1] : 0;
+            if (part == 0 || part > tx_len - 2 || cap < part + 1) {
+                return NXPSC_E_LENGTH;
+            }
+
+            rx[0] = 0x00;
+            for (size_t i = 0; i < part; i++) {
+                // the card answer, arbitrary but deterministic
+                rx[1 + i] = (uint8_t)(tx[2 + i] ^ 0xFF);
+                if (mock->pc_len + 2 <= sizeof(mock->pc_exchanged)) {
+                    mock->pc_exchanged[mock->pc_len++] = rx[1 + i];
+                }
+            }
+            for (size_t i = 0; i < part; i++) {
+                if (mock->pc_len < sizeof(mock->pc_exchanged)) {
+                    mock->pc_exchanged[mock->pc_len++] = tx[2 + i];
+                }
+            }
+            *rx_len = part + 1;
+            return NXPSC_OK;
+        }
+
+        case 0xFD: {                    // VerifyPC, answer with the response MAC
+            uint8_t input[1 + 3 + 16] = {0x90, 0x01, 0x02, 0x03};
+            size_t input_len = 4;
+
+            memcpy(input + input_len, mock->pc_exchanged, mock->pc_len);
+            input_len += mock->pc_len;
+
+            uint8_t full[16] = {0};
+            if (nxpsc_cmac(NXPSC_KEY_AES128, mock_pc_key, NULL, input, input_len, 0, full)
+                    != NXPSC_OK) {
+                return NXPSC_E_CRYPTO;
+            }
+            if (cap < 9) {
+                return NXPSC_E_LENGTH;
+            }
+
+            rx[0] = mock->pc_bad_mac ? 0x00 : 0x00;
+            for (int i = 0; i < 8; i++) {
+                rx[1 + i] = full[i * 2 + 1];
+            }
+            if (mock->pc_bad_mac) {
+                rx[1] ^= 0xFF;
+            }
+            *rx_len = 9;
+            return NXPSC_OK;
+        }
 
         case 0x51:                      // GetCardUID, only valid authenticated
             rx[0] = 0xAE;

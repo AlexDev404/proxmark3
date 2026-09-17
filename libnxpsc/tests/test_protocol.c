@@ -394,6 +394,165 @@ static void test_advanced_commands(void) {
     nxpsc_close(card);
 }
 
+// proximity check, end to end against a mock that computes the same CMAC
+static void test_proximity_check(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    nxpsc_key_t pc_key = {.type = NXPSC_KEY_AES128};
+    memcpy(pc_key.data, mock_pc_key, sizeof(mock_pc_key));
+
+    bool mac_ok = false;
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_proximity_check(card, &pc_key, 4, &mac_ok) == NXPSC_OK);
+    ok = ok && mac_ok;
+
+    // PreparePC, four rounds, VerifyPC
+    ok = ok && (mock.tx_count == 6);
+    ok = ok && (mock.tx[0][0] == 0xF0);
+    ok = ok && (mock.tx[1][0] == 0xF2) && (mock.tx[1][1] == 0x02);
+    ok = ok && (mock.tx[5][0] == 0xFD) && (mock.tx_len[5] == 9);
+
+    // a single round has to send the whole challenge at once
+    mock.tx_count = 0;
+    mac_ok = false;
+    ok = ok && (nxpsc_proximity_check(card, &pc_key, 1, &mac_ok) == NXPSC_OK);
+    ok = ok && mac_ok && (mock.tx_count == 3) && (mock.tx[1][1] == 0x08);
+
+    // a wrong card MAC must be reported, not silently accepted
+    mock.pc_bad_mac = true;
+    mac_ok = true;
+    ok = ok && (nxpsc_proximity_check(card, &pc_key, 2, &mac_ok) == NXPSC_OK);
+    ok = ok && (mac_ok == false);
+    mock.pc_bad_mac = false;
+
+    ok = ok && (nxpsc_proximity_check(card, &pc_key, 0, NULL) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_proximity_check(card, &pc_key, 9, NULL) == NXPSC_E_PARAM);
+
+    check("proximity check", ok);
+    nxpsc_close(card);
+}
+
+// delegated application management and the configuration wrappers
+static void test_delegation_and_config(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    nxpsc_delegate_info_t info;
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_get_delegated_info(card, 0x0102, &info) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0x69) && (mock.tx[0][1] == 0x02) && (mock.tx[0][2] == 0x01);
+    ok = ok && (info.dam_slot_version == 0x05) && (info.quota_limit == 0x0010);
+    ok = ok && (info.free_blocks == 0x0020) && (info.aid == 0x332211);
+
+    const uint8_t enck[32] = {0};
+    const uint8_t dam_mac[8] = {0};
+    const uint8_t df_name[5] = {'D', 'E', 'M', 'O', '1'};
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_delegated_application(card, 0xF51234, 0x0001, 0x00, 0x0010,
+                                                   0x0F, 3, NXPSC_KEY_AES128,
+                                                   0x1234, df_name, sizeof(df_name),
+                                                   enck, sizeof(enck),
+                                                   dam_mac, sizeof(dam_mac)) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xC9);
+    ok = ok && (mock.tx[0][1] == 0x34) && (mock.tx[0][3] == 0xF5);   // AID, little endian
+    ok = ok && (mock.tx[0][9] == 0x0F);                              // key settings
+    ok = ok && (mock.tx[0][10] == 0xA3);                             // AES, ISO, 3 keys
+    // 57 payload bytes do not fit one frame, the rest follows as 0xAF
+    ok = ok && (mock.tx_count == 2);
+    ok = ok && (mock.tx_len[0] == 55) && (mock.tx[1][0] == 0xAF) && (mock.tx_len[1] == 4);
+
+    ok = ok && (nxpsc_create_delegated_application(card, 0, 0, 0, 0, 0, 0, NXPSC_KEY_AES128,
+                                                   0, NULL, 0, NULL, 0, NULL, 0)
+                == NXPSC_E_PARAM);
+
+    // SetConfiguration wrappers all need a session
+    const uint8_t ats[5] = {0x06, 0x75, 0x77, 0x81, 0x02};
+    nxpsc_key_t key = {.type = NXPSC_KEY_AES128};
+    ok = ok && (nxpsc_set_picc_config(card, true, false) == NXPSC_E_AUTH);
+    ok = ok && (nxpsc_set_default_key(card, &key) == NXPSC_E_AUTH);
+    ok = ok && (nxpsc_set_ats(card, ats, sizeof(ats)) == NXPSC_E_AUTH);
+    ok = ok && (nxpsc_set_ats(card, ats, 0) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_set_ats(NULL, ats, sizeof(ats)) == NXPSC_E_PARAM);
+
+    // the transaction MAC file carries a key, so it needs a session and AES
+    nxpsc_access_t access = {.read = 0x01, .write = 0x02, .read_write = 0x02, .change = 0x00};
+    nxpsc_key_t des = {.type = NXPSC_KEY_DES};
+    ok = ok && (nxpsc_create_transaction_mac_file(card, 0x0F, NXPSC_COMM_FULL, &access,
+                                                  &des, 0x00) == NXPSC_E_UNSUPPORTED);
+    ok = ok && (nxpsc_create_transaction_mac_file(card, 0x0F, NXPSC_COMM_FULL, &access,
+                                                  NULL, 0x00) == NXPSC_E_PARAM);
+    // without a session the command degrades to plain, the framing must still hold
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_transaction_mac_file(card, 0x0F, NXPSC_COMM_FULL, &access,
+                                                  &key, 0x10) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xCE) && (mock.tx_len[0] == 23);
+    ok = ok && (mock.tx[0][1] == 0x0F) && (mock.tx[0][2] == 0x03);   // file, full mode
+    ok = ok && (mock.tx[0][5] == 0x02);                              // TMKeyOption AES
+    ok = ok && (mock.tx[0][22] == 0x10);                             // key version
+
+    check("delegated apps and configuration", ok);
+    nxpsc_close(card);
+}
+
+// the MIFARE Plus commands added on top of the plain read/write set
+static void test_plus_extras(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, PLUS_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    // no session, so the block operations must refuse before touching the card
+    ok = ok && (nxpsc_plus_value_transfer(card, 0x04, 10, true, true) == NXPSC_E_AUTH);
+    ok = ok && (nxpsc_plus_restore(card, 0x04) == NXPSC_E_AUTH);
+    ok = ok && (nxpsc_plus_value_transfer(NULL, 0x04, 10, true, true) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_plus_restore(NULL, 0x04) == NXPSC_E_PARAM);
+
+    // the personalisation level commands work without a session
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_plus_personalize_uid(card, 0x00) == NXPSC_OK);
+    ok = ok && (mock.plus_last_op == 0x40) && (mock.tx_len[0] == 2);
+
+    const uint8_t cfg[4] = {0x01, 0x02, 0x03, 0x04};
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_plus_set_config_sl1(card, cfg, sizeof(cfg)) == NXPSC_OK);
+    ok = ok && (mock.plus_last_op == 0x44) && (mock.tx_len[0] == 1 + sizeof(cfg));
+    ok = ok && (nxpsc_plus_set_config_sl1(card, NULL, 4) == NXPSC_E_PARAM);
+
+    uint8_t vc[16] = {0};
+    size_t vc_len = 0;
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_plus_vc_support_last_iso_l3(card, vc, sizeof(vc), &vc_len) == NXPSC_OK);
+    ok = ok && (mock.plus_last_op == 0x4B);
+    ok = ok && (nxpsc_plus_vc_support_last_iso_l3(card, NULL, 0, &vc_len) == NXPSC_E_PARAM);
+
+    // ResetAuth ends the session on both sides
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_plus_reset_auth(card) == NXPSC_OK);
+    ok = ok && (mock.plus_last_op == 0x78);
+    ok = ok && (nxpsc_is_authenticated(card) == false);
+
+    check("MIFARE Plus extras", ok);
+    nxpsc_close(card);
+}
+
 int main(void) {
     printf("libnxpsc protocol tests\n");
 
@@ -408,6 +567,9 @@ int main(void) {
     test_sdm_settings();
     test_plus_perso();
     test_advanced_commands();
+    test_proximity_check();
+    test_delegation_and_config();
+    test_plus_extras();
     test_guards();
 
     if (failures > 0) {
