@@ -1,3 +1,0 @@
-protocol 0 0
----
-protocol

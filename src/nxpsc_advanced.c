@@ -85,7 +85,7 @@ int nxpsc_create_transaction_mac_file(nxpsc_card_t *card, uint8_t file_no,
         return NXPSC_E_UNSUPPORTED;
     }
 
-    uint8_t data[21] = {0};
+    uint8_t data[22] = {0};
     size_t len = 0;
 
     data[len++] = file_no;
