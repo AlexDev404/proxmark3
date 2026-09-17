@@ -185,20 +185,31 @@ static int create_app(nxpsc_card_t *card, uint32_t aid, const nxpsc_app_config_t
     if (cfg->num_key_sets == 1 || cfg->num_key_sets > NXPSC_MAX_KEYS) {
         return NXPSC_E_PARAM;
     }
+    // AppKeySetSett is three bits wide
+    if (cfg->key_set_settings > 0x07) {
+        return NXPSC_E_PARAM;
+    }
 
     uint8_t data[32] = {0};
     size_t len = 0;
     bool key_sets = (cfg->num_key_sets >= 2);
+    bool has_ks3 = (key_sets || cfg->specific_vc_keys || cfg->specific_capability_data);
 
     put_u24(data, aid);
     len = 3;
     data[len++] = cfg->key_settings;
     data[len++] = (uint8_t)((cfg->num_keys & 0x0F) | keytype_to_card(cfg->key_type)
                             | (cfg->iso_fid_enabled ? 0x20 : 0x00)
-                            | (key_sets ? 0x10 : 0x00));
+                            | (has_ks3 ? 0x10 : 0x00));
 
+    if (has_ks3) {
+        data[len++] = (uint8_t)((key_sets ? 0x01 : 0x00)
+                                | (cfg->specific_vc_keys ? 0x02 : 0x00)
+                                | (cfg->specific_capability_data ? 0x04 : 0x00));
+    }
+
+    // the four key set bytes only follow when KeySett3 announced key sets
     if (key_sets) {
-        data[len++] = 0x01;                     // KeySett3, bit 0 enables key sets
         data[len++] = cfg->key_set_version;
         data[len++] = cfg->num_key_sets;
         data[len++] = cfg->max_key_size;

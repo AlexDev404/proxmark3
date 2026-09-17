@@ -30,6 +30,8 @@ Supported card families:
 - [macOS](md/Installation_Instructions/macOS-Installation-Instructions.md)
 
 ### Card notes
+- [Hardware notes](hardware-notes.md) - behaviour established against real
+  silicon, including the places a reference implementation is wrong
 - [DESFire](desfire.md)
 - [EV2 and later extras](advanced.md)
 - [MIFARE Plus](mifare_plus.md)

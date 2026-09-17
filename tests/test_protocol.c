@@ -866,7 +866,7 @@ static void test_create_application_layout(void) {
     cfg.num_key_sets = 2;
     cfg.key_set_version = 0x11;
     cfg.max_key_size = 16;
-    cfg.key_set_settings = 0x22;
+    cfg.key_set_settings = 0x02;    // three bits wide, the roll key
 
     mock.tx_count = 0;
     ok = ok && (nxpsc_create_application_ex(card, 0x010203, &cfg) == NXPSC_OK);
@@ -876,12 +876,39 @@ static void test_create_application_layout(void) {
     ok = ok && (mock.tx[0][7] == 0x11);     // AKSVersion
     ok = ok && (mock.tx[0][8] == 0x02);     // NoKeySets
     ok = ok && (mock.tx[0][9] == 16);       // MaxKeySize
-    ok = ok && (mock.tx[0][10] == 0x22);    // AppKeySetSett
+    ok = ok && (mock.tx[0][10] == 0x02);    // AppKeySetSett
     ok = ok && (mock.tx[0][11] == 0x10) && (mock.tx[0][12] == 0xE1);
     ok = ok && (memcmp(&mock.tx[0][13], df_name, sizeof(df_name)) == 0);
 
+    // specific VC keys ride in KeySett3 without bringing the key set block,
+    // so the ISO fields follow it straight away
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.key_settings = 0x0F;
+    cfg.num_keys = 3;
+    cfg.key_type = NXPSC_KEY_AES128;
+    cfg.iso_fid_enabled = true;
+    cfg.iso_fid = 0xE110;
+    cfg.specific_vc_keys = true;
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_application_ex(card, 0x010203, &cfg) == NXPSC_OK);
+    ok = ok && (mock.tx_count == 1) && (mock.tx_len[0] == 9);
+    ok = ok && (mock.tx[0][5] == (0x03 | 0x80 | 0x20 | 0x10));
+    ok = ok && (mock.tx[0][6] == 0x02);     // KeySett3, VC keys only
+    ok = ok && (mock.tx[0][7] == 0x10) && (mock.tx[0][8] == 0xE1);
+
     // one key set is not a set, the caller meant either none or at least two
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.key_settings = 0x0F;
+    cfg.num_keys = 3;
+    cfg.key_type = NXPSC_KEY_AES128;
     cfg.num_key_sets = 1;
+    ok = ok && (nxpsc_create_application_ex(card, 0x010203, &cfg) == NXPSC_E_PARAM);
+
+    // AppKeySetSett is three bits wide
+    cfg.num_key_sets = 2;
+    cfg.max_key_size = 16;
+    cfg.key_set_settings = 0x0F;
     ok = ok && (nxpsc_create_application_ex(card, 0x010203, &cfg) == NXPSC_E_PARAM);
 
     check("CreateApplication payload layout", ok);

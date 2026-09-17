@@ -124,6 +124,9 @@ nxpsc_roll_key_set(card, key_set);                       // make it the active o
 Roll is the switch. Until it is called the new set is inert, so a batch of cards
 can be prepared over weeks and cut over in one pass.
 
+The statuses each step answers, and what they mean, are in
+[Hardware notes](hardware-notes.md#key-sets).
+
 Three things are easy to get wrong here, all confirmed against EV3:
 
 - the second argument to `nxpsc_init_key_set()` is the new set's **key type**,
@@ -153,6 +156,14 @@ country into your terminal.
 bool mac_ok = false;
 nxpsc_proximity_check(card, &pc_key, rounds, &mac_ok);
 ```
+
+`rounds` has to divide 8, so 1, 2, 4 or 8. `pc_key` is the application's VC
+Proximity Key, key `0x21`, not an ordinary application key, and an application
+only carries one when it was created with `specific_vc_keys`. Two things will
+bite otherwise: the call returns `NXPSC_E_AUTH` with `mac_ok` false rather than
+failing loudly, and `PreparePC` leaves the card in proximity check mode where
+every other command answers `0x0B` until the field drops. See
+[Hardware notes](hardware-notes.md#the-proximity-check).
 
 The library generates the 8 byte challenge, splits it over `rounds` exchanges,
 1 to 8, collects the card answers, and computes the AES CMAC, truncated to its
