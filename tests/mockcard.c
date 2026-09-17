@@ -22,6 +22,7 @@
 #include "nxpsc_internal.h"
 #include "nxpsc_crypto.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 // the proximity check key the mock answers with, the tests use the same one
@@ -78,6 +79,257 @@ void mock_init(mock_card_t *mock, nxpsc_cardtype_t type) {
     static const uint8_t uid[7] = {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
     memcpy(mock->uid, uid, sizeof(uid));
     memcpy(mock->auth_ti, "\xDE\xAD\xBE\xEF", sizeof(mock->auth_ti));
+}
+
+static void mock_secure_ctx(const mock_card_t *mock, nxpsc_card_t *card) {
+    memset(card, 0, sizeof(*card));
+    card->authenticated = mock->secure_active;
+    card->channel = mock->secure_channel;
+    card->key_type = mock->secure_key_type;
+    memcpy(card->session_enc, mock->secure_session_enc, sizeof(card->session_enc));
+    memcpy(card->session_mac, mock->secure_session_mac, sizeof(card->session_mac));
+    memcpy(card->iv, mock->secure_iv, sizeof(card->iv));
+    memcpy(card->ti, mock->secure_ti, sizeof(card->ti));
+    card->cmd_ctr = mock->secure_cmd_ctr;
+}
+
+static void mock_secure_advance(mock_card_t *mock) {
+    if (mock->secure_active &&
+            (mock->secure_channel == NXPSC_CHAN_EV2 || mock->secure_channel == NXPSC_CHAN_LRP)) {
+        mock->secure_cmd_ctr++;
+    }
+}
+
+static int mock_secure_reply(mock_card_t *mock, uint8_t cmd, nxpsc_commmode_t comm,
+                             const uint8_t *payload, size_t payload_len, uint8_t status,
+                             bool d40_ev1_style, uint8_t *rx, size_t cap, size_t *rx_len) {
+    (void)cmd;
+
+    nxpsc_card_t ctx;
+    mock_secure_ctx(mock, &ctx);
+    size_t bs = nxpsc_block_size(ctx.key_type);
+    size_t mac_len = nxpsc_mac_length(&ctx);
+
+    if (ctx.channel == NXPSC_CHAN_EV2 || ctx.channel == NXPSC_CHAN_LRP) {
+        ctx.cmd_ctr++;
+    }
+
+    if (cap < 1) {
+        return NXPSC_E_LENGTH;
+    }
+
+    rx[0] = status;
+
+    switch (comm) {
+        case NXPSC_COMM_PLAIN:
+            if (payload_len > cap - 1) {
+                return NXPSC_E_LENGTH;
+            }
+            if (payload_len > 0) {
+                memcpy(rx + 1, payload, payload_len);
+            }
+            *rx_len = payload_len + 1;
+            return NXPSC_OK;
+
+        case NXPSC_COMM_MAC:
+            if (payload_len + mac_len > cap - 1) {
+                return NXPSC_E_LENGTH;
+            }
+            if (payload_len > 0) {
+                memcpy(rx + 1, payload, payload_len);
+            }
+
+            if (ctx.channel == NXPSC_CHAN_D40) {
+                size_t plen = nxpsc_padded_len(payload_len, bs);
+                uint8_t buf[NXPSC_MAX_RESPONSE] = {0};
+                uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+
+                if (payload_len > 0) {
+                    memcpy(buf, payload, payload_len);
+                }
+                int rc = nxpsc_cbc_crypt_ex(ctx.key_type, ctx.session_mac, iv, buf, plen, buf,
+                                            true, true);
+                if (rc != NXPSC_OK) {
+                    return rc;
+                }
+                memcpy(rx + 1 + payload_len, iv, mac_len);
+            } else if (ctx.channel == NXPSC_CHAN_EV1) {
+                uint8_t *buf = calloc(payload_len + 1, 1);
+                if (buf == NULL) {
+                    return NXPSC_E_MEMORY;
+                }
+                if (payload_len > 0) {
+                    memcpy(buf, payload, payload_len);
+                }
+                buf[payload_len] = status;
+
+                uint8_t cmac[NXPSC_MAX_BLOCK] = {0};
+                int rc = nxpsc_cmac(ctx.key_type, ctx.session_mac, ctx.iv, buf, payload_len + 1,
+                                    0, cmac);
+                free(buf);
+                if (rc != NXPSC_OK) {
+                    return rc;
+                }
+                memcpy(rx + 1 + payload_len, cmac, mac_len);
+            } else {
+                uint8_t mac[8] = {0};
+                int rc = nxpsc_ev2_cmac(&ctx, 0x00, payload, payload_len, mac);
+                if (rc != NXPSC_OK) {
+                    return rc;
+                }
+                memcpy(rx + 1 + payload_len, mac, mac_len);
+            }
+
+            *rx_len = 1 + payload_len + mac_len;
+            return NXPSC_OK;
+
+        case NXPSC_COMM_FULL:
+            break;
+    }
+
+    if (ctx.channel == NXPSC_CHAN_D40) {
+        size_t crc_len = d40_ev1_style ? 4 : 2;
+        size_t plen = nxpsc_padded_len(payload_len + crc_len, bs);
+        uint8_t buf[NXPSC_MAX_RESPONSE] = {0};
+
+        if (plen > cap - 1) {
+            return NXPSC_E_LENGTH;
+        }
+        if (payload_len > 0) {
+            memcpy(buf, payload, payload_len);
+        }
+
+        int rc = NXPSC_OK;
+        if (d40_ev1_style) {
+            uint8_t crc_input[NXPSC_MAX_RESPONSE + 1] = {0};
+            uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+
+            if (payload_len > 0) {
+                memcpy(crc_input, payload, payload_len);
+            }
+            crc_input[payload_len] = status;
+            nxpsc_crc32(crc_input, payload_len + 1, buf + payload_len);
+            memcpy(iv, mock->secure_iv, sizeof(iv));
+            rc = nxpsc_cbc_crypt(ctx.key_type, ctx.session_enc, iv, buf, plen, rx + 1, true);
+        } else {
+            uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+            nxpsc_crc16(buf, payload_len, buf + payload_len);
+            rc = nxpsc_cbc_crypt_ex(ctx.key_type, ctx.session_enc, iv, buf, plen, rx + 1,
+                                    true, true);
+        }
+        if (rc != NXPSC_OK) {
+            return rc;
+        }
+        *rx_len = 1 + plen;
+        return NXPSC_OK;
+    }
+
+    if (ctx.channel == NXPSC_CHAN_EV1) {
+        size_t plen = nxpsc_padded_len(payload_len + 4, bs);
+        uint8_t buf[NXPSC_MAX_RESPONSE] = {0};
+        uint8_t crc_input[NXPSC_MAX_RESPONSE + 1] = {0};
+
+        if (plen > cap - 1) {
+            return NXPSC_E_LENGTH;
+        }
+        if (payload_len > 0) {
+            memcpy(buf, payload, payload_len);
+            memcpy(crc_input, payload, payload_len);
+        }
+        crc_input[payload_len] = status;
+        nxpsc_crc32(crc_input, payload_len + 1, buf + payload_len);
+
+        uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+        memcpy(iv, mock->secure_iv, sizeof(iv));
+        int rc = nxpsc_cbc_crypt(ctx.key_type, ctx.session_enc, iv, buf, plen, rx + 1, true);
+        if (rc != NXPSC_OK) {
+            return rc;
+        }
+        *rx_len = 1 + plen;
+        return NXPSC_OK;
+    }
+
+    size_t plen = nxpsc_padded_len(payload_len + 1, NXPSC_AES_BLOCK);
+    uint8_t buf[NXPSC_MAX_RESPONSE] = {0};
+    if (plen + mac_len > cap - 1) {
+        return NXPSC_E_LENGTH;
+    }
+    if (payload_len > 0) {
+        memcpy(buf, payload, payload_len);
+    }
+    buf[payload_len] = 0x80;
+
+    int rc = NXPSC_OK;
+    if (ctx.channel == NXPSC_CHAN_LRP) {
+        size_t out_len = 0;
+        nxpsc_lrp_ctx_t lrp;
+        nxpsc_lrp_init(&lrp, ctx.session_enc, 1, false);
+        nxpsc_lrp_set_counter(&lrp, ctx.iv, 4 * 2);
+        rc = nxpsc_lrp_encode(&lrp, buf, plen, rx + 1, cap - 1, &out_len);
+    } else {
+        uint8_t iv[NXPSC_AES_BLOCK] = {0};
+        nxpsc_ev2_fill_iv(&ctx, false, iv);
+        rc = nxpsc_cbc_crypt(NXPSC_KEY_AES128, ctx.session_enc, iv, buf, plen, rx + 1, true);
+    }
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+
+    uint8_t mac[8] = {0};
+    rc = nxpsc_ev2_cmac(&ctx, 0x00, rx + 1, plen, mac);
+    if (rc != NXPSC_OK) {
+        return rc;
+    }
+    memcpy(rx + 1 + plen, mac, mac_len);
+    *rx_len = 1 + plen + mac_len;
+    return NXPSC_OK;
+}
+
+static void mock_update_ev1_request_iv(mock_card_t *mock, uint8_t cmd,
+                                       const uint8_t *tx, size_t tx_len) {
+    if (mock->secure_active == false || mock->secure_channel != NXPSC_CHAN_EV1 || tx_len < 1) {
+        return;
+    }
+
+    nxpsc_card_t ctx;
+    mock_secure_ctx(mock, &ctx);
+
+    uint8_t *buf = calloc(tx_len, 1);
+    if (buf == NULL) {
+        return;
+    }
+    buf[0] = cmd;
+    if (tx_len > 1) {
+        memcpy(buf + 1, tx + 1, tx_len - 1);
+    }
+
+    uint8_t cmac[NXPSC_MAX_BLOCK] = {0};
+    if (nxpsc_cmac(ctx.key_type, ctx.session_mac, ctx.iv, buf, tx_len, 0, cmac) == NXPSC_OK) {
+        memcpy(mock->secure_iv, ctx.iv, sizeof(mock->secure_iv));
+    }
+    free(buf);
+}
+
+static bool mock_has_valid_ev2_request_mac(mock_card_t *mock, const uint8_t *tx, size_t tx_len) {
+    if (mock->secure_active == false || mock->validate_secure_requests == false ||
+            (mock->secure_channel != NXPSC_CHAN_EV2 && mock->secure_channel != NXPSC_CHAN_LRP)) {
+        return true;
+    }
+
+    size_t mac_len = 8;
+    if (tx_len < 1 + mac_len) {
+        return true;
+    }
+
+    nxpsc_card_t ctx;
+    mock_secure_ctx(mock, &ctx);
+
+    size_t data_len = tx_len - 1 - mac_len;
+    uint8_t mac[8] = {0};
+    if (nxpsc_ev2_cmac(&ctx, tx[0], tx + 1, data_len, mac) != NXPSC_OK) {
+        return false;
+    }
+    return nxpsc_memeq(tx + 1 + data_len, mac, mac_len);
 }
 
 // GetVersion answers in three frames, the first two ask for continuation
@@ -478,6 +730,13 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
         return plus_frame(mock, tx, tx_len, rx, cap, rx_len);
     }
 
+    if (mock_has_valid_ev2_request_mac(mock, tx, tx_len) == false) {
+        return mock_secure_reply(mock, tx[0], NXPSC_COMM_PLAIN, NULL, 0, 0x1E, false,
+                                 rx, cap, rx_len);
+    }
+
+    mock_update_ev1_request_iv(mock, tx[0], tx, tx_len);
+
     // ISO 7816-4 wrapped frame, answer with a plain 0x9000
     if (tx[0] == 0x00 || tx[0] == 0x90) {
         if (tx[0] == 0x90 && tx_len >= 2) {
@@ -563,6 +822,14 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             if (cap < 7) {
                 return NXPSC_E_LENGTH;
             }
+            if (mock->secure_active && tx_len >= 9 &&
+                    (mock->secure_channel == NXPSC_CHAN_EV2 || mock->secure_channel == NXPSC_CHAN_LRP)) {
+                uint8_t payload[6] = {0x01, 0x02, 0x03, 0x11, 0x22, 0x33};
+                int rc = mock_secure_reply(mock, tx[0], NXPSC_COMM_MAC, payload, sizeof(payload),
+                                           0x00, false, rx, cap, rx_len);
+                mock_secure_advance(mock);
+                return rc;
+            }
             rx[0] = 0x00;
             rx[1] = 0x01;
             rx[2] = 0x02;
@@ -616,7 +883,23 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             if (tx_len >= 8) {
                 length = (uint32_t)tx[5] | ((uint32_t)tx[6] << 8) | ((uint32_t)tx[7] << 16);
             }
-            if (length == 0 || length > cap - 1) {
+            if (mock->read_len > 0) {
+                length = (uint32_t)mock->read_len;
+            }
+            if (length == 0 || length > 64) {
+                length = 16;
+            }
+            if (mock->secure_active && mock->read_comm != NXPSC_COMM_PLAIN) {
+                uint8_t payload[64] = {0};
+                for (uint32_t i = 0; i < length; i++) {
+                    payload[i] = (uint8_t)i;
+                }
+                int rc = mock_secure_reply(mock, tx[0], mock->read_comm, payload, length, 0x00,
+                                           false, rx, cap, rx_len);
+                mock_secure_advance(mock);
+                return rc;
+            }
+            if (length > cap - 1) {
                 length = (cap > 17) ? 16 : 1;
             }
 
@@ -718,12 +1001,27 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
         }
 
         case 0x51:                      // GetCardUID, only valid authenticated
+            if (mock->secure_active) {
+                int rc = mock_secure_reply(mock, tx[0], NXPSC_COMM_FULL, mock->uid,
+                                           sizeof(mock->uid), 0x00, mock->d40_ev1_style_uid,
+                                           rx, cap, rx_len);
+                mock_secure_advance(mock);
+                return rc;
+            }
             rx[0] = 0xAE;
             *rx_len = 1;
             return NXPSC_OK;
 
         default:
             break;
+    }
+
+    if (mock->secure_active && mock->reject_cmd == tx[0]) {
+        int rc = mock_secure_reply(mock, tx[0], NXPSC_COMM_PLAIN, NULL, 0, mock->reject_status,
+                                   false, rx, cap, rx_len);
+        mock->reject_cmd = 0;
+        mock_secure_advance(mock);
+        return rc;
     }
 
     // everything else acknowledges without data

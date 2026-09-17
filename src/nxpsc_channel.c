@@ -170,6 +170,17 @@ static size_t iso9797_m2_len(const uint8_t *data, size_t len) {
     return 0;
 }
 
+static int copy_output(uint8_t *dst, size_t cap, const uint8_t *src, size_t len, size_t *dst_len) {
+    if (len > cap) {
+        return NXPSC_E_LENGTH;
+    }
+    if (len > 0) {
+        memcpy(dst, src, len);
+    }
+    *dst_len = len;
+    return NXPSC_OK;
+}
+
 // EV2 IV, AN12343. E(SesAuthENCKey, 0xA55A|0x5AA5 || TI || CmdCtr || zeros)
 void nxpsc_ev2_fill_iv(nxpsc_card_t *card, bool for_command, uint8_t *iv) {
     uint8_t buf[NXPSC_AES_BLOCK] = {0};
@@ -585,18 +596,10 @@ static int decode_d40(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
                       uint8_t *dst, size_t cap, size_t *dst_len) {
     size_t bs = block_len(card);
 
-    if (src_len > cap) {
-        return NXPSC_E_LENGTH;
-    }
-    if (src_len > 0) {
-        memcpy(dst, src, src_len);
-    }
-    *dst_len = src_len;
-
     if (card->mode == MODE_MAC) {
         size_t mac_len = nxpsc_mac_length(card);
         if (receives_mac(card, card->last_cmd) == false) {
-            return NXPSC_OK;
+            return copy_output(dst, cap, src, src_len, dst_len);
         }
         if (src_len <= mac_len) {
             return NXPSC_E_LENGTH;
@@ -620,41 +623,45 @@ static int decode_d40(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
             card->mac_mismatch = true;
             return NXPSC_E_CRYPTO;
         }
-        *dst_len = src_len - mac_len;
-        return NXPSC_OK;
+        return copy_output(dst, cap, src, src_len - mac_len, dst_len);
     }
 
     if (card->mode == MODE_ENC || card->mode == MODE_ENC_PADDED) {
+        uint8_t plain[NXPSC_MAX_RESPONSE] = {0};
+
         if (src_len < bs) {
-            return NXPSC_OK;
+            return copy_output(dst, cap, src, src_len, dst_len);
         }
 
         uint8_t iv[NXPSC_MAX_BLOCK] = {0};
-        int rc = nxpsc_cbc_crypt_ex(card->key_type, card->session_enc, iv, src, src_len, dst,
+        int rc = nxpsc_cbc_crypt_ex(card->key_type, card->session_enc, iv, src, src_len, plain,
                                     false, false);
         if (rc != NXPSC_OK) {
             return rc;
         }
 
-        size_t pure = nxpsc_search_crc_pos(dst, src_len, status, 2);
+        size_t pure = nxpsc_search_crc_pos(plain, src_len, status, 2);
+        if (pure == 0 && card->type != DESFIRE_MF3ICD40) {
+            memcpy(iv, card->iv, sizeof(iv));
+            rc = nxpsc_cbc_crypt(card->key_type, card->session_enc, iv, src, src_len, plain, false);
+            if (rc != NXPSC_OK) {
+                return rc;
+            }
+            pure = nxpsc_search_crc_pos(plain, src_len, status, 4);
+        }
         if (pure == 0) {
             return NXPSC_E_CRYPTO;
         }
-        *dst_len = pure;
-        return NXPSC_OK;
+        return copy_output(dst, cap, plain, pure, dst_len);
     }
 
-    return NXPSC_OK;
+    return copy_output(dst, cap, src, src_len, dst_len);
 }
 
 static int decode_ev1(nxpsc_card_t *card, const uint8_t *src, size_t src_len, uint8_t status,
                       uint8_t *dst, size_t cap, size_t *dst_len) {
     size_t bs = block_len(card);
     size_t mac_len = nxpsc_mac_length(card);
-
-    if (src_len > cap) {
-        return NXPSC_E_LENGTH;
-    }
 
     if (card->mode == MODE_PLAIN || card->mode == MODE_MAC ||
             (card->mode == MODE_ENC && card->last_request_zero_len == false)) {
@@ -664,8 +671,6 @@ static int decode_ev1(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
         }
 
         size_t data_len = src_len - mac_len;
-        memcpy(dst, src, data_len);
-        *dst_len = data_len;
 
         uint8_t *buf = calloc(data_len + 1, 1);
         if (buf == NULL) {
@@ -685,33 +690,31 @@ static int decode_ev1(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
             card->mac_mismatch = true;
             return NXPSC_E_CRYPTO;
         }
-        return NXPSC_OK;
+        return copy_output(dst, cap, src, data_len, dst_len);
     }
 
     if (card->mode == MODE_ENC || card->mode == MODE_ENC_PADDED) {
+        uint8_t plain[NXPSC_MAX_RESPONSE] = {0};
+
         if (src_len < bs) {
-            memcpy(dst, src, src_len);
-            *dst_len = src_len;
-            return NXPSC_OK;
+            return copy_output(dst, cap, src, src_len, dst_len);
         }
 
-        int rc = nxpsc_cbc_crypt(card->key_type, card->session_enc, card->iv, src, src_len,
-                                 dst, false);
+        uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+        memcpy(iv, card->iv, sizeof(iv));
+        int rc = nxpsc_cbc_crypt(card->key_type, card->session_enc, iv, src, src_len, plain, false);
         if (rc != NXPSC_OK) {
             return rc;
         }
 
-        size_t pure = nxpsc_search_crc_pos(dst, src_len, status, 4);
+        size_t pure = nxpsc_search_crc_pos(plain, src_len, status, 4);
         if (pure == 0) {
             return NXPSC_E_CRYPTO;
         }
-        *dst_len = pure;
-        return NXPSC_OK;
+        return copy_output(dst, cap, plain, pure, dst_len);
     }
 
-    memcpy(dst, src, src_len);
-    *dst_len = src_len;
-    return NXPSC_OK;
+    return copy_output(dst, cap, src, src_len, dst_len);
 }
 
 static int decode_ev2(nxpsc_card_t *card, const uint8_t *src, size_t src_len, uint8_t status,
@@ -720,19 +723,8 @@ static int decode_ev2(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
 
     size_t mac_len = nxpsc_mac_length(card);
 
-    // every answer advances the command counter, including plain ones
-    card->cmd_ctr++;
-
-    if (src_len > cap) {
-        return NXPSC_E_LENGTH;
-    }
-    if (src_len > 0) {
-        memcpy(dst, src, src_len);
-    }
-    *dst_len = src_len;
-
     if (card->mode != MODE_MAC && card->mode != MODE_ENC && card->mode != MODE_ENC_PADDED) {
-        return NXPSC_OK;
+        return copy_output(dst, cap, src, src_len, dst_len);
     }
 
     if (src_len < mac_len) {
@@ -751,35 +743,33 @@ static int decode_ev2(nxpsc_card_t *card, const uint8_t *src, size_t src_len, ui
         return NXPSC_E_CRYPTO;
     }
 
-    *dst_len = data_len;
-
     if (card->mode == MODE_MAC || data_len < NXPSC_AES_BLOCK) {
-        return NXPSC_OK;
+        return copy_output(dst, cap, src, data_len, dst_len);
     }
 
+    uint8_t plain[NXPSC_MAX_RESPONSE] = {0};
     if (card->channel == NXPSC_CHAN_LRP) {
         size_t out_len = 0;
         nxpsc_lrp_ctx_t lrp;
         nxpsc_lrp_init(&lrp, card->session_enc, 1, false);
         nxpsc_lrp_set_counter(&lrp, card->iv, 4 * 2);
-        rc = nxpsc_lrp_decode(&lrp, src, data_len, dst, cap, &out_len);
+        rc = nxpsc_lrp_decode(&lrp, src, data_len, plain, sizeof(plain), &out_len);
         memcpy(card->iv, lrp.counter, 4);
     } else {
         uint8_t iv[NXPSC_AES_BLOCK] = {0};
         nxpsc_ev2_fill_iv(card, false, iv);
-        rc = nxpsc_cbc_crypt(NXPSC_KEY_AES128, card->session_enc, iv, src, data_len, dst, false);
+        rc = nxpsc_cbc_crypt(NXPSC_KEY_AES128, card->session_enc, iv, src, data_len, plain, false);
     }
 
     if (rc != NXPSC_OK) {
         return rc;
     }
 
-    size_t pure = iso9797_m2_len(dst, data_len);
+    size_t pure = iso9797_m2_len(plain, data_len);
     if (pure == 0) {
         return NXPSC_E_CRYPTO;
     }
-    *dst_len = pure;
-    return NXPSC_OK;
+    return copy_output(dst, cap, plain, pure, dst_len);
 }
 
 int nxpsc_channel_decode(nxpsc_card_t *card, const uint8_t *src, size_t src_len, uint8_t status,

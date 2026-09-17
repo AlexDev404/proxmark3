@@ -450,6 +450,11 @@ int nxpsc_exchange(nxpsc_card_t *card, uint8_t cmd, const uint8_t *data, size_t 
         rc = nxpsc_raw_exchange(card, cmd, wrapped, wrapped_len, &status, raw, NXPSC_MAX_RESPONSE, &raw_len);
     }
 
+    if (rc == NXPSC_OK && status != DF_S_ADDITIONAL_FRAME && card->authenticated &&
+            (card->channel == NXPSC_CHAN_EV2 || card->channel == NXPSC_CHAN_LRP)) {
+        card->cmd_ctr++;
+    }
+
     if (rc == NXPSC_OK && status != DF_S_OK && status != DF_S_SIGNATURE) {
         rc = NXPSC_E_CARD;
     }
