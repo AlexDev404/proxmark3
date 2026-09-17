@@ -48,6 +48,79 @@ static int fixed_rng(void *ctx, uint8_t *out, size_t len) {
     return NXPSC_OK;
 }
 
+static bool setup_secure_session(mock_card_t *mock, nxpsc_card_t **card_out, nxpsc_cardtype_t type,
+                                 nxpsc_channel_t channel, nxpsc_keytype_t key_type,
+                                 const uint8_t *session_enc, const uint8_t *session_mac,
+                                 const uint8_t *iv, const uint8_t *ti, uint16_t cmd_ctr) {
+    nxpsc_transport_t transport;
+    size_t key_len = nxpsc_key_size(key_type);
+
+    mock_init(mock, type);
+    mock_transport(mock, &transport);
+
+    if (nxpsc_open(&transport, card_out) != NXPSC_OK) {
+        return false;
+    }
+
+    mock->secure_active = true;
+    mock->secure_channel = channel;
+    mock->secure_key_type = key_type;
+    memcpy(mock->secure_session_enc, session_enc, key_len);
+    memcpy(mock->secure_session_mac, session_mac, key_len);
+    memcpy(mock->secure_iv, iv, sizeof(mock->secure_iv));
+    memcpy(mock->secure_ti, ti, sizeof(mock->secure_ti));
+    mock->secure_cmd_ctr = cmd_ctr;
+
+    (*card_out)->authenticated = true;
+    (*card_out)->channel = channel;
+    (*card_out)->key_type = key_type;
+    (*card_out)->type = type;
+    memcpy((*card_out)->session_enc, session_enc, key_len);
+    memcpy((*card_out)->session_mac, session_mac, key_len);
+    memcpy((*card_out)->iv, iv, sizeof((*card_out)->iv));
+    memcpy((*card_out)->ti, ti, sizeof((*card_out)->ti));
+    (*card_out)->cmd_ctr = cmd_ctr;
+    return true;
+}
+
+static bool run_exact_buffer_read_case(nxpsc_cardtype_t type, nxpsc_channel_t channel,
+                                       nxpsc_keytype_t key_type, nxpsc_commmode_t comm) {
+    static const uint8_t session_enc[16] = {
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F
+    };
+    static const uint8_t session_mac[16] = {
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+        0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F
+    };
+    static const uint8_t iv[16] = {0};
+    static const uint8_t ti[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+
+    mock_card_t mock;
+    nxpsc_card_t *card = NULL;
+    bool ok = setup_secure_session(&mock, &card, type, channel, key_type,
+                                   session_enc, session_mac, iv, ti, 0);
+    if (ok == false) {
+        return false;
+    }
+
+    mock.read_comm = comm;
+    mock.read_len = 64;
+    mock.validate_secure_requests = (channel == NXPSC_CHAN_EV2);
+
+    uint8_t buf[64] = {0};
+    size_t len = 0;
+
+    ok = (nxpsc_read_data(card, 0x01, 0, 64, comm, buf, sizeof(buf), &len) == NXPSC_OK);
+    ok = ok && (len == sizeof(buf));
+    for (size_t i = 0; ok && i < sizeof(buf); i++) {
+        ok = ok && (buf[i] == (uint8_t)i);
+    }
+
+    nxpsc_close(card);
+    return ok;
+}
+
 static void setup_mock_auth(mock_card_t *mock, mock_auth_scheme_t scheme,
                             const nxpsc_key_t *key, const uint8_t *rnd_b) {
     size_t key_len = nxpsc_key_size(key->type);
@@ -690,6 +763,100 @@ static void test_secure_channel_guards(void) {
     check("secure channel short MAC rejection", ok);
 }
 
+static void test_secure_channel_exact_buffers(void) {
+    check("D40 MAC exact-size buffer",
+          run_exact_buffer_read_case(DESFIRE_MF3ICD40, NXPSC_CHAN_D40,
+                                     NXPSC_KEY_2K3DES, NXPSC_COMM_MAC));
+    check("D40 ENC exact-size buffer",
+          run_exact_buffer_read_case(DESFIRE_MF3ICD40, NXPSC_CHAN_D40,
+                                     NXPSC_KEY_2K3DES, NXPSC_COMM_FULL));
+    check("EV1 MAC exact-size buffer",
+          run_exact_buffer_read_case(DESFIRE_EV1, NXPSC_CHAN_EV1,
+                                     NXPSC_KEY_AES128, NXPSC_COMM_MAC));
+    check("EV1 ENC exact-size buffer",
+          run_exact_buffer_read_case(DESFIRE_EV1, NXPSC_CHAN_EV1,
+                                     NXPSC_KEY_AES128, NXPSC_COMM_FULL));
+    check("EV2 MAC exact-size buffer",
+          run_exact_buffer_read_case(DESFIRE_EV2, NXPSC_CHAN_EV2,
+                                     NXPSC_KEY_AES128, NXPSC_COMM_MAC));
+    check("EV2 ENC exact-size buffer",
+          run_exact_buffer_read_case(DESFIRE_EV2, NXPSC_CHAN_EV2,
+                                     NXPSC_KEY_AES128, NXPSC_COMM_FULL));
+}
+
+static void test_legacy_get_card_uid_ev1_style(void) {
+    static const uint8_t session[16] = {
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+    };
+    static const uint8_t iv[16] = {
+        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48
+    };
+    static const uint8_t ti[4] = {0};
+
+    mock_card_t mock;
+    nxpsc_card_t *card = NULL;
+    bool ok = setup_secure_session(&mock, &card, DESFIRE_EV3, NXPSC_CHAN_D40,
+                                   NXPSC_KEY_2K3DES, session, session, iv, ti, 0);
+
+    uint8_t uid[7] = {0};
+    size_t uid_len = 0;
+
+    if (ok) {
+        mock.d40_ev1_style_uid = true;
+        ok = ok && (nxpsc_get_card_uid(card, uid, sizeof(uid), &uid_len) == NXPSC_OK);
+        ok = ok && (uid_len == sizeof(uid));
+        ok = ok && (memcmp(uid, mock.uid, sizeof(uid)) == 0);
+    }
+
+    check("legacy GetCardUID EV1-style decode", ok);
+    nxpsc_close(card);
+}
+
+static void test_ev2_counter_sync_on_card_error(void) {
+    static const uint8_t session_enc[16] = {
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
+        0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F
+    };
+    static const uint8_t session_mac[16] = {
+        0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+        0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F
+    };
+    static const uint8_t iv[16] = {0};
+    static const uint8_t ti[4] = {0xCA, 0xFE, 0xBA, 0xBE};
+
+    mock_card_t mock;
+    nxpsc_card_t *card = NULL;
+    bool ok = setup_secure_session(&mock, &card, DESFIRE_EV3, NXPSC_CHAN_EV2,
+                                   NXPSC_KEY_AES128, session_enc, session_mac, iv, ti, 0);
+
+    if (ok) {
+        mock.validate_secure_requests = true;
+        mock.reject_cmd = DF_CHANGE_KEY_SETTINGS;
+        mock.reject_status = 0x9D;
+
+        uint8_t settings = 0x0F;
+        uint8_t resp[8] = {0};
+        size_t resp_len = 0;
+        ok = ok && (nxpsc_command(card, DF_CHANGE_KEY_SETTINGS, &settings, 1,
+                                  NXPSC_COMM_PLAIN, NXPSC_COMM_PLAIN,
+                                  resp, sizeof(resp), &resp_len) == NXPSC_E_CARD);
+        ok = ok && (nxpsc_last_status(card) == 0x9D);
+        ok = ok && (card->cmd_ctr == 1);
+
+        uint32_t aids[2] = {0};
+        size_t count = 0;
+        ok = ok && (nxpsc_get_application_ids(card, aids, 2, &count) == NXPSC_OK);
+        ok = ok && (count == 2);
+        ok = ok && (aids[0] == 0x030201) && (aids[1] == 0x332211);
+        ok = ok && (card->cmd_ctr == 2);
+        ok = ok && (mock.secure_cmd_ctr == 2);
+    }
+
+    check("EV2 counter sync after card error", ok);
+    nxpsc_close(card);
+}
+
 static void test_plus_authentication(void) {
     plus_auth_ctx_t ctx = {
         .key = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -887,6 +1054,9 @@ int main(void) {
     test_advanced_commands();
     test_proximity_check();
     test_secure_channel_guards();
+    test_secure_channel_exact_buffers();
+    test_legacy_get_card_uid_ev1_style();
+    test_ev2_counter_sync_on_card_error();
     test_plus_authentication();
     test_plus_missing_mac();
     test_delegation_and_config();

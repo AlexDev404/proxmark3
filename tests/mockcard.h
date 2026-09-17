@@ -35,10 +35,24 @@ typedef enum {
 typedef struct {
     nxpsc_cardtype_t type;
     uint8_t uid[7];
+    bool secure_active;
+    nxpsc_channel_t secure_channel;
+    nxpsc_keytype_t secure_key_type;
+    uint8_t secure_session_enc[NXPSC_MAX_KEY_SIZE];
+    uint8_t secure_session_mac[NXPSC_MAX_KEY_SIZE];
+    uint8_t secure_iv[NXPSC_MAX_BLOCK];
+    uint8_t secure_ti[4];
+    uint16_t secure_cmd_ctr;
+    bool validate_secure_requests;
+    nxpsc_commmode_t read_comm;
+    size_t read_len;
     uint32_t selected_aid;
     int version_step;
     bool in_version;
     uint8_t plus_last_op;
+    uint8_t reject_cmd;
+    uint8_t reject_status;
+    bool d40_ev1_style_uid;
     mock_auth_scheme_t auth_scheme;
     bool auth_pending;
     bool auth_first;
