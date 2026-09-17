@@ -1,0 +1,70 @@
+Start testing: Sep 17 18:00 UTC
+----------------------------------------------------------
+2/2 Testing: protocol
+2/2 Test: protocol
+Command: "/home/runner/work/libnxpsc/libnxpsc/build-asan/nxpsc_test_protocol"
+Directory: /home/runner/work/libnxpsc/libnxpsc/build-asan
+"protocol" start time: Sep 17 18:00 UTC
+Output:
+----------------------------------------------------------
+=================================================================
+==4506==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7feb16907975 at pc 0x55dde9ea40aa bp 0x7ffdb924d970 sp 0x7ffdb924d960
+WRITE of size 1 at 0x7feb16907975 thread T0
+    #0 0x55dde9ea40a9 in nxpsc_create_transaction_mac_file /home/runner/work/libnxpsc/libnxpsc/src/nxpsc_advanced.c:101
+    #1 0x55dde9e83a38 in test_delegation_and_config /home/runner/work/libnxpsc/libnxpsc/tests/test_protocol.c:722
+    #2 0x55dde9e7e35f in main /home/runner/work/libnxpsc/libnxpsc/tests/test_protocol.c:797
+    #3 0x7feb1882a1c9  (/lib/x86_64-linux-gnu/libc.so.6+0x2a1c9) (BuildId: 328820b908de8ea1ef79afa8995e302e819163d7)
+    #4 0x7feb1882a28a in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x2a28a) (BuildId: 328820b908de8ea1ef79afa8995e302e819163d7)
+    #5 0x55dde9e7f124 in _start (/home/runner/work/libnxpsc/libnxpsc/build-asan/nxpsc_test_protocol+0x7124) (BuildId: 9647a1c44de6019d8ba56ff53c3be6249c097643)
+
+Address 0x7feb16907975 is located in stack of thread T0 at offset 117 in frame
+    #0 0x55dde9ea3caf in nxpsc_create_transaction_mac_file /home/runner/work/libnxpsc/libnxpsc/src/nxpsc_advanced.c:80
+
+  This frame has 3 object(s):
+    [32, 40) 'resp_len' (line 104)
+    [64, 80) 'resp' (line 103)
+    [96, 117) 'data' (line 88) <== Memory access at offset 117 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow /home/runner/work/libnxpsc/libnxpsc/src/nxpsc_advanced.c:101 in nxpsc_create_transaction_mac_file
+Shadow bytes around the buggy address:
+  0x7feb16907680: f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 00 00 00 00
+  0x7feb16907700: f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5
+  0x7feb16907780: f5 f5 f5 f5 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7feb16907800: f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5
+  0x7feb16907880: f5 f5 f5 f5 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7feb16907900: f1 f1 f1 f1 00 f2 f2 f2 00 00 f2 f2 00 00[05]f3
+  0x7feb16907980: f3 f3 f3 f3 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7feb16907a00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7feb16907a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7feb16907b00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7feb16907b80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==4506==ABORTING
+<end of output>
+Test time =   0.60 sec
+----------------------------------------------------------
+Test Failed.
+"protocol" end time: Sep 17 18:00 UTC
+"protocol" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 17 18:00 UTC

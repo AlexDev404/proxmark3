@@ -1,0 +1,1 @@
+/usr/bin/cc -fsanitize=address -fno-omit-frame-pointer -O1 -O2 -g -DNDEBUG -fsanitize=address -Wl,--dependency-file=CMakeFiles/nxpsc_test_crypto.dir/link.d CMakeFiles/nxpsc_test_crypto.dir/tests/test_crypto.c.o -o nxpsc_test_crypto  libnxpsc.a

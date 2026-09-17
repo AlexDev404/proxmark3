@@ -1,0 +1,1 @@
+/usr/bin/cc -fsanitize=address -fno-omit-frame-pointer -O1 -O2 -g -DNDEBUG -fsanitize=address -Wl,--dependency-file=CMakeFiles/nxpsc_personalize.dir/link.d CMakeFiles/nxpsc_personalize.dir/examples/personalize.c.o CMakeFiles/nxpsc_personalize.dir/examples/loopback.c.o -o nxpsc_personalize  libnxpsc.a

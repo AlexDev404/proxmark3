@@ -1,0 +1,1 @@
+/usr/bin/cc -fsanitize=address -fno-omit-frame-pointer -O1 -O2 -g -DNDEBUG -fsanitize=address -Wl,--dependency-file=CMakeFiles/nxpsc_test_protocol.dir/link.d CMakeFiles/nxpsc_test_protocol.dir/tests/test_protocol.c.o CMakeFiles/nxpsc_test_protocol.dir/tests/mockcard.c.o -o nxpsc_test_protocol  libnxpsc.a
