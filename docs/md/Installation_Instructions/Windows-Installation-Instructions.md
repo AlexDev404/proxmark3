@@ -14,6 +14,19 @@ cd build && ctest -C Release --output-on-failure
 The library links `bcrypt.lib` for `BCryptGenRandom`, the CMake build does this
 for you.
 
+The build produces both flavours:
+
+| File | What it is |
+|---|---|
+| `nxpsc.lib` | static library, link it together with `bcrypt.lib` |
+| `nxpsc.dll` | shared library, every non-static function exported |
+| `nxpsc.dll.lib` | import library for `nxpsc.dll` |
+
+The headers carry no `__declspec(dllexport)`, so the DLL is built with
+`WINDOWS_EXPORT_ALL_SYMBOLS`, as the ELF and MinGW builds already export
+everything. Bindings that load the DLL at run time (P/Invoke, ctypes, FFI) need
+only `nxpsc.dll`.
+
 ## MinGW or MSYS2
 
 ```

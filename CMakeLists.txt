@@ -73,7 +73,18 @@ if(NXPSC_BUILD_SHARED)
         OUTPUT_NAME nxpsc
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
+        # the headers carry no __declspec(dllexport), so without this an MSVC
+        # build produces an nxpsc.dll that exports nothing. every non-static
+        # symbol is exported, which is what the ELF and MinGW builds already do
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
+    # MSVC names both the static library and the DLL's import library
+    # nxpsc.lib, and the build refuses to produce two files of the same name.
+    # nxpsc.lib stays the static library, the import library becomes
+    # nxpsc.dll.lib. MinGW already tells them apart (libnxpsc.a, libnxpsc.dll.a)
+    if(MSVC)
+        set_target_properties(nxpsc_shared PROPERTIES IMPORT_SUFFIX ".dll.lib")
+    endif()
     target_include_directories(nxpsc_shared PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -156,7 +167,9 @@ endif()
 include(GNUInstallDirs)
 install(TARGETS nxpsc ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 if(NXPSC_BUILD_SHARED)
+    # ARCHIVE is the Windows import library (nxpsc.dll.lib / libnxpsc.dll.a)
     install(TARGETS nxpsc_shared LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(DIRECTORY include/nxpsc DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
