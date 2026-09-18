@@ -49,6 +49,7 @@ typedef struct {
     size_t read_len;
     uint32_t selected_aid;
     int version_step;
+    int df_names_step;           // GetDFNames answers one entry per frame
     bool in_version;
     uint8_t plus_last_op;
     uint8_t reject_cmd;

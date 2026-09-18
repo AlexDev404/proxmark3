@@ -18,6 +18,7 @@ says so.
 - [Changing the key you are authenticated with](#changing-the-key-you-are-authenticated-with)
 - [Key sets](#key-sets)
 - [Key settings](#key-settings)
+- [GetDFNames can disable a card](#getdfnames-can-disable-a-card)
 - [Records](#records)
 - [Files in an ISO application](#files-in-an-iso-application)
 - [Transaction MAC files](#transaction-mac-files)
@@ -189,6 +190,32 @@ answers it without a MAC** and the session is gone afterwards. Asking for a MACe
 answer turns a command the card carried out into a local length error, which
 looks like a refusal and is not one. `nxpsc_roll_key_set()` asks for a plain
 answer and resets the channel.
+
+## GetDFNames can disable a card
+^[Top](#top)
+
+**Never send GetDFNames while the PICC has a session open.** Measured by the
+proxmark3 project on three DESFire EV1 8K cards: with one open, the card answers
+the first `0xAF` continuation frame of the chained response with `0xC1`, "PICC
+will be disabled", and is dead from then on. Unauthenticated, the identical
+frames are answered normally.
+
+EV2 and EV3 dropped the self disabling status codes, so the mistake survives
+there. That is what makes it easy to ship: it works on the card in front of you
+and destroys the older one in the field.
+
+It is the card's session that matters, not whether the reader MACs the command,
+so sending it plain while authenticated is no safer.
+`nxpsc_get_df_names()` refuses outright with `NXPSC_E_AUTH` when a session is
+open. `SelectApplication` ends the session on the card, so select and then call.
+
+The entries also have to be read one frame at a time. Each frame is one
+application, `AID(3) || ISO FID(2) || DF name`, and the name carries no length of
+its own, so the frame boundary is the only thing that says where it ends.
+Following the `0xAF` chain in one go concatenates them and the entries become
+indistinguishable; this library used to do exactly that and reported two
+applications as one with a 16 byte name. proxmark3 keeps each frame's length for
+the same reason.
 
 ## Records
 ^[Top](#top)

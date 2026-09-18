@@ -974,6 +974,218 @@ static void test_legacy_des_degraded_session_key(void) {
     nxpsc_close(card);
 }
 
+// Everything Tessera and Crucible drive on hardware should also be pinned off
+// card, because a framing or parsing regression on a card surfaces as a status
+// byte a long way from its cause. These cover the calls those two suites use
+// that nothing here reached.
+static void test_info_parsing(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    uint8_t settings = 0;
+    uint8_t num_keys = 0;
+    nxpsc_keytype_t ktype = NXPSC_KEY_DES;
+    ok = ok && (nxpsc_get_key_settings(card, &settings, &num_keys, &ktype) == NXPSC_OK);
+    ok = ok && (settings == 0x0F) && (num_keys == 3) && (ktype == NXPSC_KEY_AES128);
+
+    uint8_t version = 0;
+    ok = ok && (nxpsc_get_key_version(card, 1, &version) == NXPSC_OK);
+    ok = ok && (version == 0x42);
+
+    uint32_t freemem = 0;
+    ok = ok && (nxpsc_get_free_memory(card, &freemem) == NXPSC_OK);
+
+    uint8_t sig[64] = {0};
+    size_t siglen = 0;
+    ok = ok && (nxpsc_get_signature(card, sig, sizeof(sig), &siglen) == NXPSC_OK);
+    ok = ok && (siglen == 56) && (sig[0] == 0xA0) && (sig[55] == 0xD7);
+
+    uint8_t ids[NXPSC_MAX_FILES] = {0};
+    size_t count = 0;
+    ok = ok && (nxpsc_get_file_ids(card, ids, NXPSC_MAX_FILES, &count) == NXPSC_OK);
+    ok = ok && (count == 3);
+
+    uint16_t iso_ids[NXPSC_MAX_FILES] = {0};
+    count = 0;
+    ok = ok && (nxpsc_get_iso_file_ids(card, iso_ids, NXPSC_MAX_FILES, &count) == NXPSC_OK);
+    ok = ok && (count == 2) && (iso_ids[0] == 0xE110) && (iso_ids[1] == 0xE111);
+
+    check("info commands parse what the card returns", ok);
+    nxpsc_close(card);
+}
+
+// GetDFNames answers one application per frame, and the DF name length is only
+// knowable from the frame length. Two applications is the case that tells a
+// working parser from one that happens to survive a single entry.
+static void test_get_df_names_two_apps(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    nxpsc_app_t apps[4];
+    size_t count = 0;
+    memset(apps, 0, sizeof(apps));
+    ok = ok && (nxpsc_get_df_names(card, apps, 4, &count) == NXPSC_OK);
+
+    ok = ok && (count == 2);
+    if (count == 2) {
+        ok = ok && (apps[0].aid == 0x030201) && (apps[0].iso_fid == 0xE110);
+        ok = ok && (apps[0].df_name_len == 5);
+        ok = ok && (memcmp(apps[0].df_name, "first", 5) == 0);
+
+        ok = ok && (apps[1].aid == 0x332211) && (apps[1].iso_fid == 0xE120);
+        ok = ok && (apps[1].df_name_len == 10);
+        ok = ok && (memcmp(apps[1].df_name, "second.app", 10) == 0);
+    }
+
+    // and it refuses outright while a session is open, because sending it then
+    // disables an EV1 permanently
+    card->authenticated = true;
+    ok = ok && (nxpsc_get_df_names(card, apps, 4, &count) == NXPSC_E_AUTH);
+
+    check("GetDFNames keeps two applications apart", ok);
+    nxpsc_close(card);
+}
+
+// the payloads the file management calls build, asserted byte for byte
+static void test_file_management_framing(void) {
+    nxpsc_access_t acc = {.read = 0x0E, .write = 0x00, .read_write = 0x01, .change = 0x02};
+
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    // ChangeFileSettings refuses to build a payload without a session, and the
+    // channel stays AUTO so the bytes reach the mock unwrapped
+    card->authenticated = true;
+
+    // backup file: fileno, comm, access(2), size(3)
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_backup_file(card, 4, 0x0000, NXPSC_COMM_MAC, &acc, 32) == NXPSC_OK);
+    ok = ok && (mock.tx_len[0] == 8) && (mock.tx[0][0] == 0xCB);
+    ok = ok && (mock.tx[0][1] == 0x04) && (mock.tx[0][2] == 0x01);
+    ok = ok && (mock.tx[0][5] == 0x20) && (mock.tx[0][6] == 0x00) && (mock.tx[0][7] == 0x00);
+
+    // value file: fileno, comm, access(2), lower(4), upper(4), value(4), limited(1)
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_value_file(card, 5, NXPSC_COMM_MAC, &acc, 0, 1000, 500, true)
+                == NXPSC_OK);
+    ok = ok && (mock.tx_len[0] == 18) && (mock.tx[0][0] == 0xCC);
+    ok = ok && (mock.tx[0][1] == 0x05);
+    ok = ok && (mock.tx[0][9] == 0xE8) && (mock.tx[0][10] == 0x03);   // upper 1000
+    ok = ok && (mock.tx[0][13] == 0xF4) && (mock.tx[0][14] == 0x01);  // value 500
+    ok = ok && (mock.tx[0][17] == 0x01);                              // limited credit
+
+    // cyclic and linear record files differ only in opcode
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_record_file(card, true, 6, 0x0000, NXPSC_COMM_MAC, &acc, 8, 4)
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xC0) && (mock.tx_len[0] == 11);
+    ok = ok && (mock.tx[0][5] == 0x08) && (mock.tx[0][8] == 0x04);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_create_record_file(card, false, 7, 0x0000, NXPSC_COMM_MAC, &acc, 8, 4)
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xC1);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_delete_file(card, 4) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xDF) && (mock.tx[0][1] == 0x04) && (mock.tx_len[0] == 2);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_change_file_settings(card, 3, NXPSC_COMM_FULL, &acc) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0x5F) && (mock.tx[0][1] == 0x03) && (mock.tx[0][2] == 0x03);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_delete_application(card, 0x010203) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xDA) && (mock.tx_len[0] == 4);
+    ok = ok && (mock.tx[0][1] == 0x03) && (mock.tx[0][2] == 0x02) && (mock.tx[0][3] == 0x01);
+
+    check("file management payload framing", ok);
+    nxpsc_close(card);
+}
+
+// the data, record and value access calls, and the transaction pair
+static void test_data_access_framing(void) {
+    static const uint8_t payload[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    // WriteData: fileno, offset(3), length(3), data
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_write_data(card, 2, 0x10, payload, sizeof(payload), NXPSC_COMM_PLAIN)
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0x3D) && (mock.tx_len[0] == 1 + 7 + sizeof(payload));
+    ok = ok && (mock.tx[0][1] == 0x02);
+    ok = ok && (mock.tx[0][2] == 0x10) && (mock.tx[0][3] == 0x00) && (mock.tx[0][4] == 0x00);
+    ok = ok && (mock.tx[0][5] == 0x04) && (mock.tx[0][8] == 0xDE);
+
+    // WriteRecord has the same shape under a different opcode
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_write_record(card, 6, 0, payload, sizeof(payload), NXPSC_COMM_PLAIN)
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0x3B) && (mock.tx[0][1] == 0x06);
+
+    // ReadRecords parses whatever the card sends back
+    uint8_t back[64] = {0};
+    size_t back_len = 0;
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_read_records(card, 6, 0, 2, NXPSC_COMM_PLAIN, back, sizeof(back), &back_len)
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xBB) && (back_len == 16);
+    ok = ok && (back[0] == 0x10) && (back[8] == 0x20);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_clear_record_file(card, 6) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xEB) && (mock.tx[0][1] == 0x06);
+
+    // credit, debit and limited credit differ only in opcode
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_credit(card, 5, 50, NXPSC_COMM_PLAIN) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0x0C) && (mock.tx[0][1] == 0x05) && (mock.tx[0][2] == 0x32);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_debit(card, 5, 30, NXPSC_COMM_PLAIN) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xDC) && (mock.tx[0][2] == 0x1E);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_limited_credit(card, 5, 10, NXPSC_COMM_PLAIN) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0x1C) && (mock.tx[0][2] == 0x0A);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_commit_transaction(card) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xC7) && (mock.tx_len[0] == 1);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_abort_transaction(card) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0xA7) && (mock.tx_len[0] == 1);
+
+    check("data and record access framing", ok);
+    nxpsc_close(card);
+}
+
 // Changing the key the running session was built on takes that key out from
 // under it, so the card answers without a MAC. Demanding one turns a key change
 // the card carried out into a local length error, which tells the caller the old
@@ -1357,6 +1569,10 @@ int main(void) {
     test_create_application_layout();
     test_legacy_get_card_uid();
     test_legacy_des_degraded_session_key();
+    test_info_parsing();
+    test_get_df_names_two_apps();
+    test_file_management_framing();
+    test_data_access_framing();
     test_change_key_ends_session();
     test_picc_config_flags();
     test_session_abort_on_card_error();

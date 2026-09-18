@@ -382,6 +382,43 @@ static bool mock_has_valid_ev2_request_mac(mock_card_t *mock, const uint8_t *tx,
     return nxpsc_memeq(tx + 1 + data_len, mac, mac_len);
 }
 
+// GetDFNames answers one application per frame, each AID(3) || ISO fid(2) ||
+// DF name, and asks for the next with 0xAF. The name length is only knowable
+// from the frame length, so a reader that concatenates the frames first cannot
+// tell where one name ends and the next entry begins
+static int df_names_frame(mock_card_t *mock, uint8_t *rx, size_t cap, size_t *rx_len) {
+    static const struct {
+        uint8_t aid[3];
+        uint8_t fid[2];
+        const char *name;
+    } entries[2] = {
+        {{0x01, 0x02, 0x03}, {0x10, 0xE1}, "first"},
+        {{0x11, 0x22, 0x33}, {0x20, 0xE1}, "second.app"},
+    };
+
+    if (mock->df_names_step >= 2) {
+        if (cap < 1) {
+            return NXPSC_E_LENGTH;
+        }
+        rx[0] = 0x00;
+        *rx_len = 1;
+        return NXPSC_OK;
+    }
+
+    int i = mock->df_names_step++;
+    size_t name_len = strlen(entries[i].name);
+    if (cap < 6 + name_len) {
+        return NXPSC_E_LENGTH;
+    }
+
+    rx[0] = (mock->df_names_step < 2) ? 0xAF : 0x00;
+    memcpy(rx + 1, entries[i].aid, 3);
+    memcpy(rx + 4, entries[i].fid, 2);
+    memcpy(rx + 6, entries[i].name, name_len);
+    *rx_len = 6 + name_len;
+    return NXPSC_OK;
+}
+
 // GetVersion answers in three frames, the first two ask for continuation
 static int version_frame(const mock_card_t *mock, uint8_t *rx, size_t cap, size_t *rx_len) {
     const family_t *fam = find_family(mock->type);
@@ -838,6 +875,9 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             if (mock->auth_pending) {
                 return auth_continue(mock, tx, tx_len, rx, cap, rx_len);
             }
+            if (mock->df_names_step > 0 && mock->df_names_step < 2) {
+                return df_names_frame(mock, rx, cap, rx_len);
+            }
             if (mock->in_version == false) {
                 // continuation of a long command, just acknowledge it
                 rx[0] = 0x00;
@@ -894,6 +934,79 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             rx[5] = 0x22;
             rx[6] = 0x33;
             *rx_len = 7;
+            return NXPSC_OK;
+
+        case 0x61:                      // GetISOFileIDs, two byte ids little endian
+            if (cap < 5) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            rx[1] = 0x10; rx[2] = 0xE1;     // 0xE110
+            rx[3] = 0x11; rx[4] = 0xE1;     // 0xE111
+            *rx_len = 5;
+            return NXPSC_OK;
+
+        case 0x6D:                      // GetDFNames
+            // the card answers one application per frame and asks for another
+            // with 0xAF, so the entries arrive with their boundaries intact
+            mock->df_names_step = 0;
+            return df_names_frame(mock, rx, cap, rx_len);
+
+        case 0x45:                      // GetKeySettings
+            if (cap < 3) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            rx[1] = 0x0F;                   // settings
+            rx[2] = 0x83;                   // 3 keys, AES
+            *rx_len = 3;
+            return NXPSC_OK;
+
+        case 0x64:                      // GetKeyVersion
+            if (cap < 2) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            rx[1] = 0x42;
+            *rx_len = 2;
+            return NXPSC_OK;
+
+        case 0x3C:                      // Read_Sig
+            if (cap < 57) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            for (size_t i = 0; i < 56; i++) {
+                rx[1 + i] = (uint8_t)(0xA0 + i);
+            }
+            *rx_len = 57;
+            return NXPSC_OK;
+
+        case 0xBB: {                    // ReadRecords, oldest first
+            size_t want = (tx_len >= 8) ? (size_t)tx[5] : 1;
+            size_t size = 8;
+            if (want == 0 || want > 4 || cap < 1 + want * size) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            for (size_t r = 0; r < want; r++) {
+                for (size_t i = 0; i < size; i++) {
+                    rx[1 + r * size + i] = (uint8_t)(0x10 * (r + 1) + i);
+                }
+            }
+            *rx_len = 1 + want * size;
+            return NXPSC_OK;
+        }
+
+        case 0xC8:                      // CommitReaderID, returns the previous one
+            if (cap < 17) {
+                return NXPSC_E_LENGTH;
+            }
+            rx[0] = 0x00;
+            for (size_t i = 0; i < 16; i++) {
+                rx[1 + i] = (uint8_t)(0xC0 + i);
+            }
+            *rx_len = 17;
             return NXPSC_OK;
 
         case 0x6F:                      // GetFileIDs

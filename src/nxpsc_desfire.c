@@ -306,33 +306,63 @@ int nxpsc_get_df_names(nxpsc_card_t *card, nxpsc_app_t *apps, size_t cap, size_t
         return NXPSC_E_PARAM;
     }
 
-    uint8_t resp[NXPSC_MAX_RESPONSE] = {0};
-    size_t resp_len = 0;
-
-    int rc = nxpsc_exchange(card, DF_GET_DF_NAMES, NULL, 0, eff(card, MODE_MAC),
-                            eff(card, MODE_MAC), resp, sizeof(resp), &resp_len);
-    if (rc != NXPSC_OK) {
-        return rc;
+    // This must not be sent while the PICC has a session open. Measured by the
+    // proxmark3 project on three EV1 8K cards: with one open the card answers
+    // the first 0xAF continuation frame of the chained response with 0xC1,
+    // "PICC will be disabled", and is dead from then on. EV2 and EV3 dropped
+    // the self disabling statuses, so it survives there, which is what makes
+    // the mistake easy to ship. It is the card's session that matters, not
+    // whether we MAC the command, so refusing is the only safe answer.
+    // SelectApplication ends the session on the card, so select and then call.
+    if (card->authenticated) {
+        return NXPSC_E_AUTH;
     }
 
-    // each entry is AID(3) || ISO FID(2) || DF name(1..16)
+    // The card answers one application per frame, and the DF name carries no
+    // length of its own, so the frame boundary is the only thing that says
+    // where it ends. Reading the frames one at a time keeps that; following the
+    // 0xAF chain in one go concatenates them and the entries become
+    // indistinguishable. proxmark3 keeps each frame's length for the same
+    // reason. There is no session by the check above, so no MAC or command
+    // counter to maintain across the frames.
     size_t n = 0;
-    size_t off = 0;
-    while (off + 5 <= resp_len && n < cap) {
-        size_t name_len = resp_len - off - 5;
-        if (name_len > 16) {
-            name_len = 16;
+    uint8_t status = 0;
+    uint8_t cmd = DF_GET_DF_NAMES;
+
+    for (;;) {
+        uint8_t frame[64] = {0};
+        size_t frame_len = 0;
+
+        int rc = nxpsc_raw_exchange_ex(card, cmd, NULL, 0, &status, frame, sizeof(frame),
+                                       &frame_len, false);
+        if (rc != NXPSC_OK) {
+            return rc;
+        }
+        if (status != DF_S_OK && status != DF_S_ADDITIONAL_FRAME) {
+            card->last_status = status;
+            return NXPSC_E_CARD;
         }
 
-        memset(&apps[n], 0, sizeof(apps[n]));
-        apps[n].aid = get_u24(resp + off);
-        apps[n].iso_fid = (uint16_t)(resp[off + 3] | (resp[off + 4] << 8));
-        apps[n].iso_fid_enabled = true;
-        memcpy(apps[n].df_name, resp + off + 5, name_len);
-        apps[n].df_name_len = (uint8_t)name_len;
+        // AID(3) || ISO FID(2) || DF name, the name filling the rest of it
+        if (frame_len >= 5 && n < cap) {
+            size_t name_len = frame_len - 5;
+            if (name_len > 16) {
+                name_len = 16;
+            }
 
-        off += 5 + name_len;
-        n++;
+            memset(&apps[n], 0, sizeof(apps[n]));
+            apps[n].aid = get_u24(frame);
+            apps[n].iso_fid = (uint16_t)(frame[3] | (frame[4] << 8));
+            apps[n].iso_fid_enabled = true;
+            memcpy(apps[n].df_name, frame + 5, name_len);
+            apps[n].df_name_len = (uint8_t)name_len;
+            n++;
+        }
+
+        if (status != DF_S_ADDITIONAL_FRAME) {
+            break;
+        }
+        cmd = DF_ADDITIONAL_FRAME;
     }
 
     *count = n;
