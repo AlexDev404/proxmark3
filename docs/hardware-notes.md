@@ -152,6 +152,16 @@ also how `FormatPICC` is lost for good, and with it the only way to reclaim
 An application locked this way is recovered by deleting it. A PICC locked this
 way is not recovered.
 
+Both the PICC key settings and the PICC master key have since been round tripped
+on hardware: settings `0x0F` to `0x0B` and back, and the master key from the
+factory value to a different 2TDEA key and back, each step read off the card
+rather than assumed. Nothing new broke, because the one bug in that path,
+[changing the key you are authenticated with](#changing-the-key-you-are-authenticated-with),
+had already been found by doing the same thing to an application first. That is
+the argument for rehearsing it a level down: the bug it found reports a key
+change as failed after the card has carried it out, which against the PICC master
+key is how a card is lost.
+
 ## Key sets
 ^[Top](#top)
 
