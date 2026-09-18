@@ -505,9 +505,26 @@ int nxpsc_proximity_check(nxpsc_card_t *card, const nxpsc_key_t *pc_key, uint8_t
 //-----------------------------------------------------------------------------
 // SetConfiguration convenience wrappers
 //-----------------------------------------------------------------------------
-int nxpsc_set_picc_config(nxpsc_card_t *card, bool disable_format, bool random_uid) {
-    uint8_t value = (uint8_t)((disable_format ? 0x00 : 0x01) | (random_uid ? 0x02 : 0x00));
+// option 0x00, one byte, four flags. the format bit is inverted: the byte says
+// what is enabled, so a set bit 0 means format stays available
+int nxpsc_set_picc_config_ex(nxpsc_card_t *card, const nxpsc_picc_config_t *config) {
+    if (card == NULL || config == NULL) {
+        return NXPSC_E_PARAM;
+    }
+
+    uint8_t value = (uint8_t)((config->disable_format ? 0x00 : 0x01) |
+                              (config->random_uid ? 0x02 : 0x00) |
+                              (config->pc_mandatory ? 0x04 : 0x00) |
+                              (config->auth_vc_mandatory ? 0x08 : 0x00));
     return nxpsc_set_configuration(card, 0x00, &value, 1);
+}
+
+int nxpsc_set_picc_config(nxpsc_card_t *card, bool disable_format, bool random_uid) {
+    nxpsc_picc_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.disable_format = disable_format;
+    config.random_uid = random_uid;
+    return nxpsc_set_picc_config_ex(card, &config);
 }
 
 int nxpsc_set_default_key(nxpsc_card_t *card, const nxpsc_key_t *key) {

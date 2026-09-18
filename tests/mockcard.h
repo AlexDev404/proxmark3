@@ -43,6 +43,7 @@ typedef struct {
     uint8_t secure_iv[NXPSC_MAX_BLOCK];
     uint8_t secure_ti[4];
     uint16_t secure_cmd_ctr;
+    uint8_t secure_key_no;       // the key the session was built on
     bool validate_secure_requests;
     nxpsc_commmode_t read_comm;
     size_t read_len;
@@ -57,6 +58,7 @@ typedef struct {
     bool auth_pending;
     bool auth_first;
     uint8_t auth_cmd;
+    uint8_t auth_key_no;        // key number the handshake in flight is for
     nxpsc_keytype_t auth_key_type;
     uint8_t auth_key[NXPSC_MAX_KEY_SIZE];
     uint8_t auth_rnd_b[NXPSC_AES_BLOCK];

@@ -120,6 +120,7 @@ static void mock_secure_establish_legacy(mock_card_t *mock, const uint8_t *rnd_a
     }
 
     mock->secure_active = true;
+    mock->secure_key_no = mock->auth_key_no;
     mock->secure_channel = (mock->auth_cmd == DF_AUTHENTICATE) ? NXPSC_CHAN_D40 : NXPSC_CHAN_EV1;
     mock->secure_key_type = type;
     memcpy(mock->secure_session_enc, session, nxpsc_key_size(type));
@@ -130,6 +131,7 @@ static void mock_secure_establish_legacy(mock_card_t *mock, const uint8_t *rnd_a
 
 static void mock_secure_establish_ev2(mock_card_t *mock, const uint8_t *rnd_a) {
     mock->secure_active = true;
+    mock->secure_key_no = mock->auth_key_no;
     mock->secure_channel = NXPSC_CHAN_EV2;
     mock->secure_key_type = NXPSC_KEY_AES128;
     nxpsc_session_key_ev2(mock->auth_key, rnd_a, mock->auth_rnd_b, true, mock->secure_session_enc);
@@ -851,10 +853,12 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
         case 0x0A:
         case 0x1A:
         case 0xAA:
+            mock->auth_key_no = (tx_len > 1) ? (uint8_t)(tx[1] & 0x3F) : 0;
             return auth_begin_legacy(mock, tx[0], rx, cap, rx_len);
 
         case 0x71:
         case 0x77:
+            mock->auth_key_no = (tx_len > 1) ? (uint8_t)(tx[1] & 0x3F) : 0;
             if (mock->auth_scheme == MOCK_AUTH_LRP) {
                 return auth_begin_lrp(mock, tx_len > 2, rx, cap, rx_len);
             }
@@ -1069,6 +1073,34 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
 
         default:
             break;
+    }
+
+    // ChangeKey and RollKeySet take the key the running session was built on
+    // out from under it, so the card answers those without a MAC and the
+    // session is gone afterwards. a MACed answer here would let the library go
+    // back to demanding one without any test noticing
+    if (mock->secure_active && (tx[0] == DF_CHANGE_KEY || tx[0] == DF_CHANGE_KEY_EV2
+                                || tx[0] == DF_ROLL_KEY_SETTINGS)) {
+        bool ends_session = (tx[0] == DF_ROLL_KEY_SETTINGS);
+        if (tx[0] == DF_CHANGE_KEY && tx_len >= 2) {
+            ends_session = ((tx[1] & 0x3F) == mock->secure_key_no);
+        }
+        else if (tx[0] == DF_CHANGE_KEY_EV2 && tx_len >= 3) {
+            // key set 0 is the active one, so changing the session key there
+            // ends the session. any other set leaves it alone
+            ends_session = (tx[1] == 0x00) && ((tx[2] & 0x3F) == mock->secure_key_no);
+        }
+
+        int rc = mock_secure_reply(mock, tx[0],
+                                   ends_session ? NXPSC_COMM_PLAIN : NXPSC_COMM_MAC,
+                                   NULL, 0, 0x00, false, rx, cap, rx_len);
+        if (ends_session) {
+            mock_secure_abort(mock);
+        }
+        else {
+            mock_secure_advance(mock);
+        }
+        return rc;
     }
 
     if (mock->secure_active && mock->reject_cmd == tx[0]) {

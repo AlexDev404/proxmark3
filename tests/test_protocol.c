@@ -974,6 +974,118 @@ static void test_legacy_des_degraded_session_key(void) {
     nxpsc_close(card);
 }
 
+// Changing the key the running session was built on takes that key out from
+// under it, so the card answers without a MAC. Demanding one turns a key change
+// the card carried out into a local length error, which tells the caller the old
+// key is still live when it is not. Against the PICC master key that loses the
+// card, so it is worth a test that does not need one.
+static void test_change_key_ends_session(void) {
+    const nxpsc_key_t key = {
+        .type = NXPSC_KEY_AES128,
+        .data = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F},
+    };
+    const nxpsc_key_t fresh = {
+        .type = NXPSC_KEY_AES128,
+        .data = {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7,
+                 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF},
+    };
+    static const uint8_t rnd_b[16] = {0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+                                      0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F};
+
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+    mock.auth_key_type = NXPSC_KEY_AES128;
+    memcpy(mock.auth_key, key.data, sizeof(mock.auth_key));
+    memcpy(mock.auth_rnd_b, rnd_b, sizeof(rnd_b));
+
+    nxpsc_set_rng(fixed_rng, NULL);
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok) {
+        card->type = DESFIRE_EV2;
+        card->selected_aid = 0x010203;
+        ok = (nxpsc_authenticate(card, 0, &key, NXPSC_CHAN_EV2) == NXPSC_OK);
+    }
+
+    if (ok) {
+        // a key that is not the session key leaves the session alone, and the
+        // card MACs the answer as usual
+        ok = ok && (nxpsc_change_key_ev2(card, 0, 2, &key, &fresh) == NXPSC_OK);
+        ok = ok && nxpsc_is_authenticated(card);
+
+        // the session key itself does not, and the answer carries no MAC
+        ok = ok && (nxpsc_change_key(card, 0, &key, &fresh) == NXPSC_OK);
+        ok = ok && (nxpsc_is_authenticated(card) == false);
+        ok = ok && (mock.secure_active == false);
+    }
+
+    // RollKeySet is the same shape for the same reason
+    if (ok) {
+        ok = ok && (nxpsc_authenticate(card, 0, &key, NXPSC_CHAN_EV2) == NXPSC_OK);
+        ok = ok && (nxpsc_roll_key_set(card, 1) == NXPSC_OK);
+        ok = ok && (nxpsc_is_authenticated(card) == false);
+    }
+
+    nxpsc_set_rng(NULL, NULL);
+    check("a key change that ends the session is not a length error", ok);
+    nxpsc_close(card);
+}
+
+// option 0x00 is one byte carrying four flags, and every call writes all of
+// them. the two flag wrapper zeroes the other two, which is the whole reason
+// the four flag form exists
+static void test_picc_config_flags(void) {
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok == false) {
+        check("SetConfiguration option 0x00 carries all four flags", false);
+        return;
+    }
+    card->authenticated = true;
+    card->channel = NXPSC_CHAN_AUTO;
+
+    nxpsc_picc_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    // bit 0 is inverted: set means format stays available
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_set_picc_config_ex(card, &config) == NXPSC_OK);
+    ok = ok && (mock.tx[0][0] == 0x5C) && (mock.tx[0][1] == 0x00) && (mock.tx[0][2] == 0x01);
+
+    config.disable_format = true;
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_set_picc_config_ex(card, &config) == NXPSC_OK);
+    ok = ok && (mock.tx[0][2] == 0x00);
+
+    config.disable_format = false;
+    config.random_uid = true;
+    config.pc_mandatory = true;
+    config.auth_vc_mandatory = true;
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_set_picc_config_ex(card, &config) == NXPSC_OK);
+    ok = ok && (mock.tx[0][2] == (0x01 | 0x02 | 0x04 | 0x08));
+
+    // and the old two flag call still writes zero into the other two
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_set_picc_config(card, false, true) == NXPSC_OK);
+    ok = ok && (mock.tx[0][2] == (0x01 | 0x02));
+
+    ok = ok && (nxpsc_set_picc_config_ex(card, NULL) == NXPSC_E_PARAM);
+
+    check("SetConfiguration option 0x00 carries all four flags", ok);
+    nxpsc_close(card);
+}
+
 // an error answer inside a session is not a counter problem, the PICC has
 // already thrown the session away by the time it sends one
 static void test_session_abort_on_card_error(void) {
@@ -1245,6 +1357,8 @@ int main(void) {
     test_create_application_layout();
     test_legacy_get_card_uid();
     test_legacy_des_degraded_session_key();
+    test_change_key_ends_session();
+    test_picc_config_flags();
     test_session_abort_on_card_error();
     test_plus_authentication();
     test_plus_missing_mac();

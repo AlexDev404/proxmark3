@@ -22,6 +22,7 @@ says so.
 - [Files in an ISO application](#files-in-an-iso-application)
 - [Transaction MAC files](#transaction-mac-files)
 - [The proximity check](#the-proximity-check)
+- [SetConfiguration](#setconfiguration)
 - [NV memory is not reclaimed](#nv-memory-is-not-reclaimed)
 - [Reference implementations](#reference-implementations)
 
@@ -256,6 +257,43 @@ answers `0x0B` until the sequence finishes or the field drops. PC/SC disconnects
 leave the card powered, so this outlives the process and poisons the next run.
 Reset the card after a proximity check, with `SCardReconnect` and
 `SCARD_RESET_CARD` or the equivalent.
+
+## SetConfiguration
+^[Top](#top)
+
+Untested against hardware, and deliberately so: disabling `FormatPICC` and
+enabling random UID are one way, so a mistake costs the card rather than an
+application. What is worth knowing before anyone reaches for it.
+
+**Option `0x00` is a single byte carrying four flags**, not two: format enabled,
+random UID, proximity check mandatory, and virtual card authentication
+mandatory. Every call writes all four, so there is no way to change one and
+leave the rest. Read the card first and pass back what it already had.
+
+`nxpsc_set_picc_config()` only ever wrote two of them and left the other two
+zero, which silently turned off the proximity check and virtual card
+requirements as a side effect of setting anything else. Given the byte is one
+way, that is a single wrong write with no second attempt.
+`nxpsc_set_picc_config_ex()` takes all four.
+
+The options, from liblogicalaccess:
+
+| Option | Carries |
+|---|---|
+| `0x00` | the four flags above |
+| `0x01` | the default key for applications created later |
+| `0x02` | the ATS the card answers with |
+| `0x03` | SAK |
+| `0x04` | D40 and EV1 secure messaging, EV2 chained writing |
+| `0x05` | PDCap |
+| `0x06` | ISO DF names and the virtual card IID |
+
+Only option `0x00` is known to be one way. The rest look re-settable, but that
+has not been confirmed on a card and should not be assumed.
+
+Option `0x06` is the one to look at if the proximity check ever needs finishing,
+since the PICC refuses an application with its own VC keys in factory
+configuration, and `0x00` carries the two virtual card flags.
 
 ## NV memory is not reclaimed
 ^[Top](#top)
