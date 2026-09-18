@@ -856,6 +856,25 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             return NXPSC_OK;
         }
 
+        // a real ISO 7816-4 command. SELECT and UPDATE BINARY only answer a
+        // status word, READ BINARY answers Le bytes before it
+        if (tx[0] == 0x00 && tx_len >= 4 && tx[1] == ISO_INS_READ_BINARY) {
+            size_t want = (tx_len >= 5) ? tx[tx_len - 1] : 0;
+            if (want == 0) {
+                want = 256;
+            }
+            if (cap < want + 2) {
+                return NXPSC_E_LENGTH;
+            }
+            for (size_t i = 0; i < want; i++) {
+                rx[i] = (uint8_t)(0x50 + i);
+            }
+            rx[want] = 0x90;
+            rx[want + 1] = 0x00;
+            *rx_len = want + 2;
+            return NXPSC_OK;
+        }
+
         if (cap < 2) {
             return NXPSC_E_LENGTH;
         }
@@ -998,16 +1017,25 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             return NXPSC_OK;
         }
 
-        case 0xC8:                      // CommitReaderID, returns the previous one
+        case 0xC8: {                    // CommitReaderID, returns the previous one
+            uint8_t prev[16];
+            for (size_t i = 0; i < sizeof(prev); i++) {
+                prev[i] = (uint8_t)(0xC0 + i);
+            }
+            if (mock->secure_active) {
+                int rc = mock_secure_reply(mock, tx[0], NXPSC_COMM_MAC, prev, sizeof(prev),
+                                           0x00, false, rx, cap, rx_len);
+                mock_secure_advance(mock);
+                return rc;
+            }
             if (cap < 17) {
                 return NXPSC_E_LENGTH;
             }
             rx[0] = 0x00;
-            for (size_t i = 0; i < 16; i++) {
-                rx[1 + i] = (uint8_t)(0xC0 + i);
-            }
+            memcpy(rx + 1, prev, sizeof(prev));
             *rx_len = 17;
             return NXPSC_OK;
+        }
 
         case 0x6F:                      // GetFileIDs
             if (cap < 4) {

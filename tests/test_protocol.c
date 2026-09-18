@@ -1186,6 +1186,212 @@ static void test_data_access_framing(void) {
     nxpsc_close(card);
 }
 
+// The ISO 7816-4 wrappers build real APDUs rather than wrapped native frames,
+// so the header bytes are the whole of what they do and nothing else checks
+// them. Crucible drives all three against a card.
+static void test_iso7816_wrappers(void) {
+    static const uint8_t df_name[5] = {'n', 'x', 'p', 's', 'c'};
+
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    // SELECT by DF name: P1 0x04, P2 0x0C, no Le
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_iso_select_df_name(card, df_name, sizeof(df_name)) == NXPSC_OK);
+    ok = ok && (mock.tx_count == 1) && (mock.tx_len[0] == 5 + sizeof(df_name));
+    ok = ok && (mock.tx[0][0] == 0x00) && (mock.tx[0][1] == 0xA4);
+    ok = ok && (mock.tx[0][2] == 0x04) && (mock.tx[0][3] == 0x0C);
+    ok = ok && (mock.tx[0][4] == sizeof(df_name));
+    ok = ok && (memcmp(&mock.tx[0][5], df_name, sizeof(df_name)) == 0);
+
+    // SELECT by file id: P1 0x02 for an EF, 0x01 for a DF, fid big endian
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_iso_select_fid(card, 0xE110, true) == NXPSC_OK);
+    ok = ok && (mock.tx_len[0] == 7) && (mock.tx[0][2] == 0x02) && (mock.tx[0][3] == 0x0C);
+    ok = ok && (mock.tx[0][4] == 0x02);
+    ok = ok && (mock.tx[0][5] == 0xE1) && (mock.tx[0][6] == 0x10);
+
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_iso_select_fid(card, 0xE110, false) == NXPSC_OK);
+    ok = ok && (mock.tx[0][2] == 0x01);
+
+    // READ BINARY without a short file id: P1 carries the high offset bits
+    uint8_t out[64] = {0};
+    size_t out_len = 0;
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_iso_read_binary(card, 0, 0x0102, 8, out, sizeof(out), &out_len)
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][1] == 0xB0) && (mock.tx[0][2] == 0x01) && (mock.tx[0][3] == 0x02);
+    ok = ok && (mock.tx_len[0] == 5) && (mock.tx[0][4] == 0x08);
+    ok = ok && (out_len == 8) && (out[0] == 0x50) && (out[7] == 0x57);
+
+    // with one, P1 becomes 0x80 | sfi and the offset has to fit one byte
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_iso_read_binary(card, 0x03, 0x10, 4, out, sizeof(out), &out_len)
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][2] == 0x83) && (mock.tx[0][3] == 0x10);
+    ok = ok && (out_len == 4);
+
+    ok = ok && (nxpsc_iso_read_binary(card, 0x03, 0x0100, 4, out, sizeof(out), &out_len)
+                == NXPSC_E_PARAM);
+
+    // UPDATE BINARY is the same addressing with data and no Le
+    static const uint8_t payload[3] = {0xAA, 0xBB, 0xCC};
+    mock.tx_count = 0;
+    ok = ok && (nxpsc_iso_update_binary(card, 0x03, 0x10, payload, sizeof(payload))
+                == NXPSC_OK);
+    ok = ok && (mock.tx[0][1] == 0xD6) && (mock.tx[0][2] == 0x83) && (mock.tx[0][3] == 0x10);
+    ok = ok && (mock.tx[0][4] == sizeof(payload)) && (mock.tx[0][5] == 0xAA);
+
+    // argument checks
+    ok = ok && (nxpsc_iso_select_df_name(card, df_name, 0) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_iso_select_df_name(card, df_name, 17) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_iso_read_binary(card, 0, 0, 8, NULL, 0, &out_len) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_iso_update_binary(card, 0, 0, payload, 0) == NXPSC_E_PARAM);
+
+    check("ISO 7816-4 wrapper APDUs", ok);
+    nxpsc_close(card);
+}
+
+// CommitReaderID needs a session and hands back the previous reader id through
+// it. Crucible reaches this only on a card whose transaction MAC file allows it.
+static void test_commit_reader_id(void) {
+    static const uint8_t session_enc[16] = {
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
+        0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F
+    };
+    static const uint8_t session_mac[16] = {
+        0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+        0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F
+    };
+    static const uint8_t iv[16] = {0};
+    static const uint8_t ti[4] = {0xCA, 0xFE, 0xBA, 0xBE};
+    static const uint8_t reader_id[16] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10
+    };
+
+    mock_card_t mock;
+    nxpsc_card_t *card = NULL;
+    bool ok = setup_secure_session(&mock, &card, DESFIRE_EV3, NXPSC_CHAN_EV2,
+                                   NXPSC_KEY_AES128, session_enc, session_mac, iv, ti, 0);
+
+    if (ok) {
+        uint8_t prev[32] = {0};
+        size_t prev_len = 0;
+
+        mock.tx_count = 0;
+        ok = ok && (nxpsc_commit_reader_id(card, reader_id, sizeof(reader_id),
+                                           prev, sizeof(prev), &prev_len) == NXPSC_OK);
+        ok = ok && (mock.tx[0][0] == 0xC8);
+        // the reader id travels in the clear with the session MAC after it
+        ok = ok && (memcmp(&mock.tx[0][1], reader_id, sizeof(reader_id)) == 0);
+        ok = ok && (mock.tx_len[0] == 1 + 16 + 8);
+        ok = ok && (prev_len == 16) && (prev[0] == 0xC0) && (prev[15] == 0xCF);
+
+        // it is sixteen bytes or nothing, and it needs a session
+        ok = ok && (nxpsc_commit_reader_id(card, reader_id, 8, prev, sizeof(prev), &prev_len)
+                    == NXPSC_E_PARAM);
+        nxpsc_reset_channel(card);
+        ok = ok && (nxpsc_commit_reader_id(card, reader_id, sizeof(reader_id),
+                                           prev, sizeof(prev), &prev_len) == NXPSC_E_AUTH);
+    }
+
+    check("CommitReaderID carries the reader id and returns the previous one", ok);
+    nxpsc_close(card);
+}
+
+// the derivation itself has known answer vectors in the self test. this is the
+// public wrapper over it, which is what callers actually reach for
+static void test_diversification_wrapper(void) {
+    nxpsc_key_t master;
+    memset(&master, 0, sizeof(master));
+    master.type = NXPSC_KEY_AES128;
+    for (int i = 0; i < 16; i++) {
+        master.data[i] = (uint8_t)i;
+    }
+
+    static const uint8_t input[8] = {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
+    nxpsc_key_t a;
+    nxpsc_key_t b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+
+    bool ok = (nxpsc_diversify_an10922(&master, input, sizeof(input), &a) == NXPSC_OK);
+    ok = ok && (memcmp(a.data, master.data, 16) != 0);
+    ok = ok && (a.type == NXPSC_KEY_AES128);
+
+    // deterministic, and a different input gives a different key
+    ok = ok && (nxpsc_diversify_an10922(&master, input, sizeof(input), &b) == NXPSC_OK);
+    ok = ok && (memcmp(a.data, b.data, 16) == 0);
+
+    uint8_t other[8];
+    memcpy(other, input, sizeof(other));
+    other[0] ^= 0xFF;
+    ok = ok && (nxpsc_diversify_an10922(&master, other, sizeof(other), &b) == NXPSC_OK);
+    ok = ok && (memcmp(a.data, b.data, 16) != 0);
+
+    ok = ok && (nxpsc_diversify_an10922(NULL, input, sizeof(input), &a) == NXPSC_E_PARAM);
+    ok = ok && (nxpsc_diversify_an10922(&master, input, sizeof(input), NULL) == NXPSC_E_PARAM);
+
+    check("AN10922 diversification wrapper", ok);
+}
+
+// the small helpers both hardware suites lean on to report what happened
+static void test_reporting_helpers(void) {
+    bool ok = true;
+
+    ok = ok && (strcmp(nxpsc_keytype_str(NXPSC_KEY_DES), "DES") == 0);
+    ok = ok && (strcmp(nxpsc_keytype_str(NXPSC_KEY_2K3DES), "2TDEA") == 0);
+    ok = ok && (strcmp(nxpsc_keytype_str(NXPSC_KEY_3K3DES), "3TDEA") == 0);
+    ok = ok && (strcmp(nxpsc_keytype_str(NXPSC_KEY_AES128), "AES128") == 0);
+    ok = ok && (strcmp(nxpsc_keytype_str((nxpsc_keytype_t)99), "unknown") == 0);
+
+    // the statuses this work turned up, which is most of why the table matters
+    ok = ok && (strcmp(nxpsc_status_str(0x00), "operation ok") == 0);
+    ok = ok && (strstr(nxpsc_status_str(0x7E), "length") != NULL);
+    ok = ok && (strstr(nxpsc_status_str(0x1E), "CRC or MAC") != NULL);
+    ok = ok && (strstr(nxpsc_status_str(0x9D), "does not allow") != NULL);
+    ok = ok && (strstr(nxpsc_status_str(0xAE), "authentication") != NULL);
+    ok = ok && (strstr(nxpsc_status_str(0x0E), "eeprom") != NULL);
+    ok = ok && (strcmp(nxpsc_status_str(0x0B), "unknown status") == 0);
+
+    ok = ok && (strcmp(nxpsc_strerror(NXPSC_E_AUTH), "authentication error") == 0);
+    ok = ok && (strcmp(nxpsc_cardtype_str(DESFIRE_EV3), "DESFire EV3") == 0);
+
+    // and reset_channel puts the handle back where a fresh open leaves it
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV2);
+    mock_transport(&mock, &transport);
+    ok = ok && (nxpsc_open(&transport, &card) == NXPSC_OK);
+
+    if (ok) {
+        card->authenticated = true;
+        card->session_lost = true;
+        card->channel = NXPSC_CHAN_EV2;
+        card->cmd_ctr = 7;
+
+        nxpsc_reset_channel(card);
+        ok = ok && (nxpsc_is_authenticated(card) == false);
+        ok = ok && (nxpsc_session_lost(card) == false);
+        ok = ok && (card->channel == NXPSC_CHAN_AUTO) && (card->cmd_ctr == 0);
+
+        nxpsc_reset_channel(NULL);      // must not fall over
+    }
+
+    check("reporting helpers and channel reset", ok);
+    nxpsc_close(card);
+}
+
 // Changing the key the running session was built on takes that key out from
 // under it, so the card answers without a MAC. Demanding one turns a key change
 // the card carried out into a local length error, which tells the caller the old
@@ -1573,6 +1779,10 @@ int main(void) {
     test_get_df_names_two_apps();
     test_file_management_framing();
     test_data_access_framing();
+    test_iso7816_wrappers();
+    test_commit_reader_id();
+    test_diversification_wrapper();
+    test_reporting_helpers();
     test_change_key_ends_session();
     test_picc_config_flags();
     test_session_abort_on_card_error();
