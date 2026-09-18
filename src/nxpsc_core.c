@@ -24,6 +24,12 @@
 //-----------------------------------------------------------------------------
 // strings
 //-----------------------------------------------------------------------------
+// baked in when the library is compiled, so a caller linked against a stale
+// build sees that version and not the one its own headers declare
+const char *nxpsc_version_string(void) {
+    return NXPSC_VERSION_STRING;
+}
+
 const char *nxpsc_strerror(int rc) {
     switch (rc) {
         case NXPSC_OK:

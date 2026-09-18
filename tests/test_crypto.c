@@ -21,7 +21,7 @@
 #include <stdio.h>
 
 int main(void) {
-    printf("libnxpsc crypto tests\n");
+    printf("libnxpsc %s crypto tests\n", nxpsc_version_string());
 
     int rc = nxpsc_selftest(true);
     if (rc != NXPSC_OK) {
