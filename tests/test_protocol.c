@@ -1380,8 +1380,12 @@ static void test_reporting_helpers(void) {
         card->channel = NXPSC_CHAN_EV2;
         card->cmd_ctr = 7;
 
+        ok = ok && (nxpsc_active_channel(card) == NXPSC_CHAN_EV2);
+
         nxpsc_reset_channel(card);
         ok = ok && (nxpsc_is_authenticated(card) == false);
+        ok = ok && (nxpsc_active_channel(card) == NXPSC_CHAN_AUTO);
+        ok = ok && (nxpsc_active_channel(NULL) == NXPSC_CHAN_AUTO);
         ok = ok && (nxpsc_session_lost(card) == false);
         ok = ok && (card->channel == NXPSC_CHAN_AUTO) && (card->cmd_ctr == 0);
 

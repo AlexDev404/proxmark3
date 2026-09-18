@@ -63,6 +63,7 @@ typedef struct {
     nxpsc_keytype_t auth_key_type;
     uint8_t auth_key[NXPSC_MAX_KEY_SIZE];
     uint8_t auth_rnd_b[NXPSC_AES_BLOCK];
+    uint8_t auth_iv[NXPSC_MAX_BLOCK];   // carried across the ISO handshake frames
     uint8_t auth_ti[4];
 
     uint8_t pc_exchanged[32];   // interleaved proximity check challenge and answer

@@ -15,6 +15,8 @@ says so.
 - [A card error ends the session](#a-card-error-ends-the-session)
 - [Legacy authentication and the DES degraded key](#legacy-authentication-and-the-des-degraded-key)
 - [CreateApplication](#createapplication)
+- [The EV1 channel chains its IV through the handshake](#the-ev1-channel-chains-its-iv-through-the-handshake)
+- [(2K3)DES key versions live in the key bytes](#2k3des-key-versions-live-in-the-key-bytes)
 - [Changing the key you are authenticated with](#changing-the-key-you-are-authenticated-with)
 - [Key sets](#key-sets)
 - [Key settings](#key-settings)
@@ -116,6 +118,43 @@ wrappers and frame exactly as they did before.
 On the EV3 tested, asking for specific VC keys is refused with `0x9D`: the PICC
 does not allow it in its factory configuration. Turning virtual card support on
 is a `SetConfiguration` path.
+
+## The EV1 channel chains its IV through the handshake
+^[Top](#top)
+
+`AuthenticateISO` and `AuthenticateAES` carry one CBC chain across the whole
+handshake. The IV that encrypts `RndA || RndB'` is the one left behind by
+decrypting `RndB`, not a fresh zero. The legacy `0x0A` handshake is the
+exception: it starts every operation from zero.
+
+Getting that wrong fails in a way that points at the wrong end of the exchange.
+Only the first block depends on the IV, and the first block is `RndA`. `RndB'`
+sits in the later blocks and arrives intact, so **the card accepts the
+authentication and answers `0x00`**, then returns the rotation of an `RndA` it
+never really received. The reader sees a good status followed by an `RndA'` it
+cannot match and blames its own response handling.
+
+The giveaway is that the second block of the answer decodes correctly while the
+first does not, and that `RndA'` bytes 7 to 14 are exactly `RndA` bytes 8 to 15:
+that is `rol()` applied to an `RndA` whose first block was corrupted in transit.
+
+## (2K3)DES key versions live in the key bytes
+^[Top](#top)
+
+A DES, 2TDEA or 3TDEA key carries its version in the low bit of every key byte,
+so the bytes the card stores are not the bytes the caller handed over. Both keys
+in a `ChangeKey` have to be put through the same normalisation: the new one
+because that is what gets written, and the old one because the card XORs the
+payload against what it stored.
+
+Missing it on the old key is invisible until the key is changed a **second**
+time. DES treats those bits as parity and ignores them, so authentication with
+either form succeeds, and only the next `ChangeKey` fails, with `0x1E`, pointing
+at a CRC rather than at a key written three steps earlier.
+
+A single DES key also has to be normalised **before** its two halves are
+duplicated. Normalising afterwards leaves the halves differing in their low
+bits, and the card then reads the key as 2TDEA rather than DES.
 
 ## Changing the key you are authenticated with
 ^[Top](#top)

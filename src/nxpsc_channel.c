@@ -906,7 +906,12 @@ static int auth_legacy(nxpsc_card_t *card, uint8_t key_no, const nxpsc_key_t *ke
         uint8_t tmp[32] = {0};
         memcpy(tmp, rnd_a, rnd_len);
         memcpy(tmp + rnd_len, rot_b, rnd_len);
-        memset(iv, 0, sizeof(iv));
+        // the IV carries on from decrypting RndB rather than restarting at
+        // zero. Restarting corrupts only the first block, which is RndA, and
+        // RndB' sits in the later blocks and arrives intact, so the card
+        // accepts the authentication and answers with the rotation of an RndA
+        // it never really received. The failure then looks like a bad response
+        // rather than a bad request
         rc = nxpsc_cbc_crypt_ex(key->type, key->data, iv, tmp, rnd_len * 2, both, true, true);
         if (rc != NXPSC_OK) {
             return rc;

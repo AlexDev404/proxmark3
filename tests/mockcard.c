@@ -525,6 +525,9 @@ static int auth_begin_legacy(mock_card_t *mock, uint8_t cmd,
     if (rc != NXPSC_OK) {
         return rc;
     }
+    // the ISO handshake chains its IV across the frames, so keep where the
+    // RndB it just sent left it
+    memcpy(mock->auth_iv, iv, sizeof(mock->auth_iv));
 
     mock->auth_scheme = MOCK_AUTH_LEGACY;
     mock->auth_pending = true;
@@ -587,6 +590,10 @@ static int auth_continue_legacy(mock_card_t *mock, const uint8_t *tx, size_t tx_
     rol(rot_a, rnd_len);
 
     if (mock->auth_cmd == DF_AUTHENTICATE_ISO || mock->auth_cmd == DF_AUTHENTICATE_AES) {
+        // pick the chain up where the RndB frame left it. the legacy 0x0A
+        // handshake starts each operation from zero instead
+        memcpy(iv, mock->auth_iv, sizeof(iv));
+
         uint8_t tmp[NXPSC_AES_BLOCK * 2] = {0};
         uint8_t rot_b[NXPSC_AES_BLOCK] = {0};
         memcpy(tmp, rnd_a, rnd_len);

@@ -231,6 +231,10 @@ bool nxpsc_is_authenticated(const nxpsc_card_t *card) {
     return (card != NULL && card->authenticated);
 }
 
+nxpsc_channel_t nxpsc_active_channel(const nxpsc_card_t *card) {
+    return (card != NULL) ? card->channel : NXPSC_CHAN_AUTO;
+}
+
 bool nxpsc_session_lost(const nxpsc_card_t *card) {
     return (card != NULL && card->session_lost);
 }

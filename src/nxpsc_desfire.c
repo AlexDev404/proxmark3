@@ -501,22 +501,33 @@ static int change_key(nxpsc_card_t *card, bool ev2, uint8_t key_set, uint8_t key
     uint8_t old_buf[NXPSC_MAX_KEY_SIZE] = {0};
     uint8_t new_buf[NXPSC_MAX_KEY_SIZE] = {0};
 
+    // A (2K3)DES key carries its version in the low bit of every key byte, so
+    // the bytes the card stores are not the bytes the caller handed over. Both
+    // keys have to be put through the same normalisation: the new one because
+    // that is what gets written, and the old one because the card XORs against
+    // what it stored. Missing it on the old key is invisible until the key is
+    // changed a second time, since DES treats those bits as parity and
+    // authenticates either way, and then the CRC fails with 0x1E.
+    // Normalise before duplicating a single DES key, or the two halves stop
+    // matching and the card reads it as 2TDEA.
     size_t new_len = nxpsc_key_size(new_key->type);
     memcpy(new_buf, new_key->data, new_len);
-    if (new_key->type == NXPSC_KEY_DES) {
-        // a single DES key travels as a 2K3DES key with both halves equal
-        memcpy(new_buf + 8, new_key->data, 8);
-        new_len = 16;
-    }
-
     if (new_key->type != NXPSC_KEY_AES128 && new_key->type != NXPSC_KEY_AES256) {
         nxpsc_des_key_set_version(new_buf, new_key->type, new_key->version);
+    }
+    if (new_key->type == NXPSC_KEY_DES) {
+        // a single DES key travels as a 2K3DES key with both halves equal
+        memcpy(new_buf + 8, new_buf, 8);
+        new_len = 16;
     }
 
     if (same_key == false) {
         memcpy(old_buf, old_key->data, nxpsc_key_size(old_key->type));
+        if (old_key->type != NXPSC_KEY_AES128 && old_key->type != NXPSC_KEY_AES256) {
+            nxpsc_des_key_set_version(old_buf, old_key->type, old_key->version);
+        }
         if (old_key->type == NXPSC_KEY_DES) {
-            memcpy(old_buf + 8, old_key->data, 8);
+            memcpy(old_buf + 8, old_buf, 8);
         }
     }
 
