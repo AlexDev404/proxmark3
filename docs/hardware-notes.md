@@ -221,7 +221,9 @@ cost less. `FormatPICC` is the only command that gives it back, and the
 ## Reference implementations
 ^[Top](#top)
 
-Where the four disagree, the card decides. What each one is good for:
+Where they disagree, the card decides. What each one is good for, and see
+[Where the protocol knowledge came from](md/Development/Porting_Notes.md) for
+licences and the full list:
 
 | Implementation | Covers | Notes |
 |---|---|---|
@@ -230,6 +232,6 @@ Where the four disagree, the card decides. What each one is good for:
 | RevK DESFireAES | AES basics | Basic `CreateApplication` only, no ISO fields, no key sets |
 | [dumacp/smartcard](https://github.com/dumacp/smartcard) (Go) | EV2 including key sets | Confirms the `CreateApplication` key set block and the key type constants |
 | [liblogicalaccess](https://github.com/liblogicalaccess/liblogicalaccess) | EV2 including key sets and the proximity check | The only one with a proximity check. Note `createDelegatedApplicationParam` swaps the meanings of `KeySett3` bits 1 and 2 relative to `createApplication` |
-| SpringCard | Virtual card and proximity check | Reader manufacturer for this silicon. Its `VerifyPC` MAC input contradicts its own comment, omitting Option and using the measured rather than published response time. The card cannot know a reader's measured time, so the comment is right and the code is not |
+| [springcard-dotnet-libraries](https://github.com/springcard/springcard-dotnet-libraries) | Virtual card and proximity check | Reader manufacturer for this silicon. Its `VerifyPC` MAC input contradicts its own comment, omitting Option and using the measured rather than published response time. The card cannot know a reader's measured time, so the comment is right and the code is not. Licence permits redistribution only with SpringCard hardware, so it is read as a reference and nothing is taken from it |
 
 ^[Top](#top)
