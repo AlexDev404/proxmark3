@@ -117,6 +117,130 @@ cmake --build build
 See [docs/README.md](docs/README.md) for the full documentation, the transport
 backend guide and the personalisation workflows.
 
+## Quick Example (on Windows)
+
+This example connects to the card and displays some basic hardware information
+about it.
+
+
+```C++
+#include <winscard.h>
+#include <stdio.h>
+
+extern "C" {
+#include <nxpsc/nxpsc.h>
+}
+
+static int pcsc_transceive(void* vctx, const uint8_t* tx, size_t txlen,
+    uint8_t* rx, size_t rxcap, size_t* rxlen);
+
+struct PcscCtx {
+    SCARDHANDLE hCard;
+    DWORD proto;
+};
+
+
+int main()
+{
+
+    printf("libnxpsc version: %s\n", nxpsc_version_string());
+    // Library selftest
+    if (nxpsc_selftest(true) != NXPSC_OK) {
+        printf("Library selftest failed\n");
+        return 1;
+    }
+    PcscCtx ctx;
+    SCARDCONTEXT hContext;
+    LONG rv = SCardEstablishContext(SCARD_SCOPE_USER, NULL, NULL, &hContext);
+    if (rv != SCARD_S_SUCCESS) {
+        printf("Failed to establish context: %ld\n", rv);
+        return 1;
+    }
+
+    // List available readers
+    LPTSTR mszReaders = NULL;
+    DWORD dwReaders = SCARD_AUTOALLOCATE;
+    rv = SCardListReaders(hContext, NULL, (LPTSTR)&mszReaders, &dwReaders);
+    if (rv != SCARD_S_SUCCESS) {
+        printf("Failed to list readers: %ld\n", rv);
+        SCardReleaseContext(hContext);
+        return 1;
+    }
+
+    // Connect to the first reader
+    rv = SCardConnect(hContext, mszReaders, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &ctx.hCard, &ctx.proto);
+    if (rv != SCARD_S_SUCCESS) {
+        printf("no card or bad reader\n");
+        SCardFreeMemory(hContext, mszReaders);
+        SCardReleaseContext(hContext);
+        return 1;
+    }
+
+    nxpsc_transport_t transport = {};
+    transport.ctx = &ctx;
+    transport.transceive = pcsc_transceive;
+
+    nxpsc_card_t* card;
+    int rc = nxpsc_open(&transport, &card);
+    if (rc != NXPSC_OK && nxpsc_selftest(true)) {
+        printf("Failed to open card: %d\n", rc);
+        SCardDisconnect(ctx.hCard, SCARD_LEAVE_CARD);
+        SCardReleaseContext(hContext);
+        return 1;
+    }
+    printf("\nthe card is connected\n\n");
+
+    // Identify the card
+    nxpsc_cardtype_t type = NXP_UNKNOWN;
+    nxpsc_identify(card, &type);
+
+    printf("Card type: %s\n", nxpsc_cardtype_str(type));
+
+    nxpsc_version_t v{};
+    rc = nxpsc_get_version(card, &v);
+    if (rc == NXPSC_OK) {
+        printf("sw version: %u.%u\n", v.sw_major, v.sw_minor);
+        printf("hw type: %02X\n", v.hw_type);
+        printf("hw storage size: %u bytes\n", v.hw_storage);
+        printf("hw protocol: %02X\n", v.hw_protocol);
+    }
+
+    // Bytes free
+    uint32_t bytes = 0;
+    rc = nxpsc_get_free_memory(card, &bytes);
+    if (rc == NXPSC_OK)
+        printf("free: %u bytes\n", bytes);
+    return 0;
+}
+
+static int pcsc_transceive(void* vctx, const uint8_t* tx, size_t txlen,
+    uint8_t* rx, size_t rxcap, size_t* rxlen)
+{
+    PcscCtx* ctx = static_cast<PcscCtx*>(vctx);
+    DWORD rlen = static_cast<DWORD>(rxcap);
+
+    // Debug output of the sent data
+    printf(">> ");
+    for (size_t i = 0; i < txlen; i++) printf("%02X", tx[i]);
+    printf("\n");
+
+    // Transmit the APDU to the card
+    LONG rc = SCardTransmit(ctx->hCard, SCARD_PCI_T1,
+        tx, static_cast<DWORD>(txlen),
+        nullptr, rx, &rlen);
+    if (rc != SCARD_S_SUCCESS)
+        return NXPSC_E_TRANSPORT;   // card removed / no answer
+
+    // Debug output of the received data
+    printf("<< ");
+    for (DWORD i = 0; i < rlen; i++) printf("%02X", rx[i]);
+    printf("\n\n");
+
+    *rxlen = rlen;
+    return NXPSC_OK;                // card errors are decoded by the library
+}
+```
+
 ## Licence
 
 GPLv3, see [LICENSE.txt](LICENSE.txt).
