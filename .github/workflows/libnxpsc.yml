@@ -37,6 +37,41 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
+      # the installed layout is the distribution: bin/ (DLLs), lib/ (static and
+      # import libraries, shared objects), include/nxpsc/nxpsc.h
+      - name: Install
+        run: cmake --install build --config Release --prefix dist
+
+      # an MSVC nxpsc.dll once shipped with an empty export table. fail the
+      # build if the shared library does not export its public API
+      - name: Check the shared library exports
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Windows)
+              vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+              dumpbin="$("$vswhere" -latest -find '**/Hostx64/x64/dumpbin.exe' | head -n 1 | tr -d '\r')"
+              "$dumpbin" -exports dist/bin/nxpsc.dll > exports.txt
+              ;;
+            macOS)
+              nm -gU "$(find dist -name 'libnxpsc*.dylib' | head -n 1)" > exports.txt
+              ;;
+            *)
+              nm -D --defined-only "$(find dist -name 'libnxpsc.so*' -type f | head -n 1)" > exports.txt
+              ;;
+          esac
+          for sym in nxpsc_open nxpsc_close nxpsc_selftest nxpsc_authenticate nxpsc_diversify_an10922; do
+            grep -q "$sym" exports.txt || { echo "::error::$sym is not exported by the shared library"; exit 1; }
+          done
+          echo "$(grep -c 'nxpsc_' exports.txt) nxpsc_ symbols exported"
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: libnxpsc-dist-${{ matrix.os }}-${{ matrix.cc }}
+          path: dist/
+          if-no-files-found: error
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         if: always()
