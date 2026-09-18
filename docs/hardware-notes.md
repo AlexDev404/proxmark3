@@ -15,7 +15,9 @@ says so.
 - [A card error ends the session](#a-card-error-ends-the-session)
 - [Legacy authentication and the DES degraded key](#legacy-authentication-and-the-des-degraded-key)
 - [CreateApplication](#createapplication)
+- [Changing the key you are authenticated with](#changing-the-key-you-are-authenticated-with)
 - [Key sets](#key-sets)
+- [Key settings](#key-settings)
 - [Records](#records)
 - [Files in an ISO application](#files-in-an-iso-application)
 - [Transaction MAC files](#transaction-mac-files)
@@ -112,6 +114,43 @@ wrappers and frame exactly as they did before.
 On the EV3 tested, asking for specific VC keys is refused with `0x9D`: the PICC
 does not allow it in its factory configuration. Turning virtual card support on
 is a `SetConfiguration` path.
+
+## Changing the key you are authenticated with
+^[Top](#top)
+
+Changing the key the running session was built on ends that session, so **the
+card answers without a MAC**. Asking for a MACed answer turns a key change the
+card carried out into a local `NXPSC_E_LENGTH`, and that is the worst way this
+particular command can fail: the key really has changed and the caller has been
+told it did not. Aimed at the PICC master key, that is how a card gets lost.
+
+`nxpsc_change_key()` asks for a plain answer and resets the channel whenever the
+target is the session's own key. A key in a key set other than the active one is
+not the session key, so that case keeps its MAC.
+
+`RollKeySet` fails the same way for the same reason, and is handled the same way.
+
+## Key settings
+^[Top](#top)
+
+The bits, from proxmark3's decoder, confirmed on EV3:
+
+| Bit | Set means |
+|---|---|
+| 0 | the master key can be changed |
+| 1 | directory listing and `GetKeySettings` without the master key |
+| 2 | create and delete without the master key |
+| 3 | the settings themselves can be changed |
+| 4-7 | which key may change keys |
+
+Bits 0 and 3 are the ones that matter, because clearing either is irreversible.
+Clearing bit 3 freezes the settings byte: every later `ChangeKeySettings` answers
+`0x9D`, verified by doing it to a throwaway application. At PICC level that is
+also how `FormatPICC` is lost for good, and with it the only way to reclaim
+[NV memory](#nv-memory-is-not-reclaimed).
+
+An application locked this way is recovered by deleting it. A PICC locked this
+way is not recovered.
 
 ## Key sets
 ^[Top](#top)

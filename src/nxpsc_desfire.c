@@ -451,6 +451,13 @@ static int change_key(nxpsc_card_t *card, bool ev2, uint8_t key_set, uint8_t key
     }
 
     bool same_key = (key_no == card->key_no) && (ev2 == false);
+    // Changing the key the running session was built on ends that session, so
+    // the card answers without a MAC. Asking for a MACed answer turns a key
+    // change the card carried out into a local length error, which is the worst
+    // way for this particular command to fail: the key really has changed and
+    // the caller has been told it did not. A key in a key set other than the
+    // active one is not the session key, so that case keeps its MAC.
+    bool ends_session = (key_no == card->key_no) && (ev2 == false || key_set == 0);
     if (same_key == false && nxpsc_key_is_valid(old_key) == false) {
         return NXPSC_E_PARAM;
     }
@@ -551,10 +558,10 @@ static int change_key(nxpsc_card_t *card, bool ev2, uint8_t key_set, uint8_t key
     size_t resp_len = 0;
 
     int rc = nxpsc_exchange(card, ev2 ? DF_CHANGE_KEY_EV2 : DF_CHANGE_KEY, data, len,
-                            MODE_ENC_PLAIN, MODE_MAC, resp, sizeof(resp), &resp_len);
+                            MODE_ENC_PLAIN, ends_session ? MODE_PLAIN : MODE_MAC,
+                            resp, sizeof(resp), &resp_len);
 
-    // changing the key of the running session invalidates it
-    if (same_key) {
+    if (ends_session) {
         nxpsc_reset_channel(card);
     }
     return rc;
