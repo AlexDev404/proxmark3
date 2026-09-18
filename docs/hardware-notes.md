@@ -276,7 +276,9 @@ requirements as a side effect of setting anything else. Given the byte is one
 way, that is a single wrong write with no second attempt.
 `nxpsc_set_picc_config_ex()` takes all four.
 
-The options, from liblogicalaccess:
+The options. liblogicalaccess implements all seven, and the `ConfigurationOption`
+enum in dumacp/smartcard numbers them identically, which is two independent
+sources agreeing:
 
 | Option | Carries |
 |---|---|
@@ -285,11 +287,18 @@ The options, from liblogicalaccess:
 | `0x02` | the ATS the card answers with |
 | `0x03` | SAK |
 | `0x04` | D40 and EV1 secure messaging, EV2 chained writing |
-| `0x05` | PDCap |
+| `0x05` | PD capabilities, which liblogicalaccess calls PDCap |
 | `0x06` | ISO DF names and the virtual card IID |
 
 Only option `0x00` is known to be one way. The rest look re-settable, but that
 has not been confirmed on a card and should not be assumed.
+
+One framing detail if option `0x02` is ever implemented properly: liblogicalaccess
+appends a checksum to the ATS payload by hand, CRC16 on a legacy session and
+CRC32 over `cmd || option || ats` otherwise, then an `0x80` pad. On the EV1
+channel this library's `MODE_ENC` already computes CRC32 over `cmd || payload`,
+which is the same bytes, but the EV2 path adds only the padding. Worth checking
+against a card before trusting `nxpsc_set_ats()` on anything that matters.
 
 Option `0x06` is the one to look at if the proximity check ever needs finishing,
 since the PICC refuses an application with its own VC keys in factory
