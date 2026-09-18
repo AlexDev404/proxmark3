@@ -1239,9 +1239,12 @@ static int native_frame(mock_card_t *mock, const uint8_t *tx, size_t tx_len,
             ends_session = (tx[1] == 0x00) && ((tx[2] & 0x3F) == mock->secure_key_no);
         }
 
-        int rc = mock_secure_reply(mock, tx[0],
-                                   ends_session ? NXPSC_COMM_PLAIN : NXPSC_COMM_MAC,
-                                   NULL, 0, 0x00, false, rx, cap, rx_len);
+        // the legacy channel only MACs the answers to ReadData, ReadRecords and
+        // GetValue, so a ChangeKey there comes back as a bare status
+        nxpsc_commmode_t comm = (ends_session || mock->secure_channel == NXPSC_CHAN_D40)
+                                ? NXPSC_COMM_PLAIN : NXPSC_COMM_MAC;
+        int rc = mock_secure_reply(mock, tx[0], comm, NULL, 0, 0x00, false,
+                                   rx, cap, rx_len);
         if (ends_session) {
             mock_secure_abort(mock);
         }

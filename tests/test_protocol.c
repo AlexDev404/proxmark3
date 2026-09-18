@@ -1396,6 +1396,179 @@ static void test_reporting_helpers(void) {
     nxpsc_close(card);
 }
 
+// The ISO handshake carries one CBC chain across both frames: the IV that
+// encrypts RndA || RndB' is the one decrypting RndB left behind. Checking that
+// the library and the mock agree proves nothing, because they agreed while both
+// were wrong. This builds the expected frame from the primitives instead, and
+// asserts the zero IV form is not what goes out.
+static void test_ev1_handshake_chains_iv(void) {
+    const nxpsc_key_t key = {
+        .type = NXPSC_KEY_2K3DES,
+        .data = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
+    };
+    static const uint8_t rnd_b[8] = {0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87};
+    uint8_t rnd_a[8];
+    for (int i = 0; i < 8; i++) {
+        rnd_a[i] = (uint8_t)(0x10 + i);     // what fixed_rng hands out
+    }
+
+    mock_card_t mock;
+    nxpsc_transport_t transport;
+    nxpsc_card_t *card = NULL;
+
+    mock_init(&mock, DESFIRE_EV1);
+    mock_transport(&mock, &transport);
+    mock.auth_scheme = MOCK_AUTH_LEGACY;
+    mock.auth_key_type = NXPSC_KEY_2K3DES;
+    memcpy(mock.auth_key, key.data, 16);
+    memcpy(mock.auth_rnd_b, rnd_b, sizeof(rnd_b));
+
+    nxpsc_set_rng(fixed_rng, NULL);
+    bool ok = (nxpsc_open(&transport, &card) == NXPSC_OK);
+    if (ok) {
+        mock.tx_count = 0;
+        ok = (nxpsc_authenticate(card, 0, &key, NXPSC_CHAN_EV1) == NXPSC_OK);
+    }
+    nxpsc_set_rng(NULL, NULL);
+
+    if (ok) {
+        // AuthenticateISO, then the second frame carrying RndA || RndB'
+        ok = ok && (mock.tx_count == 2);
+        ok = ok && (mock.tx[0][0] == DF_AUTHENTICATE_ISO) && (mock.tx[0][1] == 0x00);
+        ok = ok && (mock.tx[1][0] == DF_ADDITIONAL_FRAME) && (mock.tx_len[1] == 1 + 16);
+
+        // the card enciphered RndB from a zero IV, which leaves the chain at
+        // that ciphertext
+        uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+        uint8_t enc_rnd_b[8] = {0};
+        ok = ok && (nxpsc_cbc_crypt_ex(NXPSC_KEY_2K3DES, key.data, iv, rnd_b,
+                                       sizeof(rnd_b), enc_rnd_b, true, true) == NXPSC_OK);
+
+        uint8_t rot_b[8];
+        memcpy(rot_b, rnd_b, sizeof(rot_b));
+        uint8_t first = rot_b[0];
+        memmove(rot_b, rot_b + 1, sizeof(rot_b) - 1);
+        rot_b[sizeof(rot_b) - 1] = first;
+
+        uint8_t plain[16];
+        memcpy(plain, rnd_a, 8);
+        memcpy(plain + 8, rot_b, 8);
+
+        // iv now holds the chain, which is what the second frame must use
+        uint8_t chained[16] = {0};
+        uint8_t chain_iv[NXPSC_MAX_BLOCK];
+        memcpy(chain_iv, iv, sizeof(chain_iv));
+        ok = ok && (nxpsc_cbc_crypt_ex(NXPSC_KEY_2K3DES, key.data, chain_iv, plain,
+                                       sizeof(plain), chained, true, true) == NXPSC_OK);
+        ok = ok && (memcmp(&mock.tx[1][1], chained, sizeof(chained)) == 0);
+
+        // and starting over from zero, which is what the bug did, must not be
+        // what went out. without this the test passes on the broken behaviour
+        uint8_t zero_iv[NXPSC_MAX_BLOCK] = {0};
+        uint8_t restarted[16] = {0};
+        ok = ok && (nxpsc_cbc_crypt_ex(NXPSC_KEY_2K3DES, key.data, zero_iv, plain,
+                                       sizeof(plain), restarted, true, true) == NXPSC_OK);
+        ok = ok && (memcmp(chained, restarted, sizeof(chained)) != 0);
+        ok = ok && (memcmp(&mock.tx[1][1], restarted, sizeof(restarted)) != 0);
+    }
+
+    check("the EV1 handshake chains its IV across the frames", ok);
+    nxpsc_close(card);
+}
+
+// A (2K3)DES key carries its version in the low bit of every key byte, so what
+// the card stores is not what the caller passed. ChangeKey has to normalise
+// both keys, because the card XORs the payload against what it stored. Missing
+// it on the old key only shows up the second time a key is changed.
+static void test_change_key_normalises_versions(void) {
+    static const uint8_t session[16] = {
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+    };
+    static const uint8_t iv_zero[16] = {0};
+    static const uint8_t ti[4] = {0};
+
+    nxpsc_key_t old_key;
+    nxpsc_key_t new_key;
+    memset(&old_key, 0, sizeof(old_key));
+    memset(&new_key, 0, sizeof(new_key));
+
+    old_key.type = NXPSC_KEY_2K3DES;
+    new_key.type = NXPSC_KEY_2K3DES;
+    for (int i = 0; i < 16; i++) {
+        old_key.data[i] = (uint8_t)(0xA0 + i);
+        new_key.data[i] = (uint8_t)(0x50 + i);
+    }
+    // versions that actually disturb the low bits, so a missed normalisation
+    // cannot pass by accident
+    old_key.version = 0xAA;
+    new_key.version = 0x0F;
+
+    mock_card_t mock;
+    nxpsc_card_t *card = NULL;
+    bool ok = setup_secure_session(&mock, &card, DESFIRE_EV1, NXPSC_CHAN_D40,
+                                   NXPSC_KEY_2K3DES, session, session, iv_zero, ti, 0);
+
+    if (ok) {
+        card->selected_aid = 0x010203;      // an application, so no key type bits
+        card->key_no = 0;                   // authenticated as key 0, changing key 1
+
+        mock.tx_count = 0;
+        int ck = nxpsc_change_key(card, 1, &old_key, &new_key);
+        ok = ok && (ck == NXPSC_OK);
+        ok = ok && (mock.tx[0][0] == DF_CHANGE_KEY) && (mock.tx[0][1] == 0x01);
+
+        // the payload is enciphered with the session key from a zero IV. D40
+        // enciphers with the decrypt primitive, so recovering it runs the
+        // encrypt one
+        uint8_t plain[32] = {0};
+        uint8_t iv[NXPSC_MAX_BLOCK] = {0};
+        size_t enc_len = mock.tx_len[0] - 2;
+        ok = ok && (enc_len == 24);
+        if (ok) {
+            ok = (nxpsc_cbc_crypt_ex(NXPSC_KEY_2K3DES, session, iv, &mock.tx[0][2],
+                                     enc_len, plain, false, true) == NXPSC_OK);
+        }
+
+        // what the card will XOR against is both keys with their versions
+        // written into the low bits
+        uint8_t want_old[16];
+        uint8_t want_new[16];
+        memcpy(want_old, old_key.data, sizeof(want_old));
+        memcpy(want_new, new_key.data, sizeof(want_new));
+        nxpsc_des_key_set_version(want_old, NXPSC_KEY_2K3DES, old_key.version);
+        nxpsc_des_key_set_version(want_new, NXPSC_KEY_2K3DES, new_key.version);
+
+        uint8_t want_xor[16];
+        for (int i = 0; i < 16; i++) {
+            want_xor[i] = (uint8_t)(want_new[i] ^ want_old[i]);
+        }
+        ok = ok && (memcmp(plain, want_xor, sizeof(want_xor)) == 0);
+
+        // leaving the old key as the caller passed it, which is what the bug
+        // did, has to give something else
+        uint8_t raw_xor[16];
+        for (int i = 0; i < 16; i++) {
+            raw_xor[i] = (uint8_t)(want_new[i] ^ old_key.data[i]);
+        }
+        ok = ok && (memcmp(want_xor, raw_xor, sizeof(want_xor)) != 0);
+        ok = ok && (memcmp(plain, raw_xor, sizeof(raw_xor)) != 0);
+
+        // the second checksum covers the normalised new key, not the raw one.
+        // the legacy channel uses a CRC16 there
+        uint8_t crc_new[2] = {0};
+        uint8_t crc_raw[2] = {0};
+        nxpsc_crc16(want_new, sizeof(want_new), crc_new);
+        nxpsc_crc16(new_key.data, sizeof(want_new), crc_raw);
+        ok = ok && (memcmp(plain + 16 + 2, crc_new, sizeof(crc_new)) == 0);
+        ok = ok && (memcmp(crc_new, crc_raw, sizeof(crc_new)) != 0);
+    }
+
+    check("ChangeKey normalises both key versions", ok);
+    nxpsc_close(card);
+}
+
 // Changing the key the running session was built on takes that key out from
 // under it, so the card answers without a MAC. Demanding one turns a key change
 // the card carried out into a local length error, which tells the caller the old
@@ -1787,6 +1960,8 @@ int main(void) {
     test_commit_reader_id();
     test_diversification_wrapper();
     test_reporting_helpers();
+    test_ev1_handshake_chains_iv();
+    test_change_key_normalises_versions();
     test_change_key_ends_session();
     test_picc_config_flags();
     test_session_abort_on_card_error();
